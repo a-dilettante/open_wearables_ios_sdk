@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+* **Workout-detail capture harness (Phase 0, additive)**: new `Internal/WorkoutDetail/` reads HealthKit workout routes, workout-associated heart rate, native events, and iOS 16+ workout activities into typed models. Routes are read via the workout-association predicate across every `HKWorkoutRouteQuery` batch and every route object; heart rate uses the workout-association predicate (never a time window) and expands condensed samples with `HKQuantitySeriesSampleQuery`, preserving interval semantics. Each family reports its own availability (`available`/`partial`/`pending_enrichment`/`not_available_or_not_authorized`/`invalid`) — never a permission outcome, which Apple does not expose.
+* **Deterministic family hashing**: canonical serialization plus SHA-256 hashes per family and a root hash. Ordering is by elapsed offset then ordinal; no absolute timestamp enters a hash.
+* **Redacted fixture writer and guard**: fixtures translate and rotate route coordinates to a synthetic origin, rebase timestamps onto `2000-01-01T00:00:00Z` preserving all offsets and gaps, and replace identifiers with keyed SHA-256 tokens. `RedactionGuard` scans the produced bytes and fails if any original coordinate, timestamp, UUID, source, or device value survives.
+* **`WorkoutDetailProbe`**: standalone probe with its own scoped `HKHealthStore` authorization request for workout + workout route + heart rate. It deliberately does not call `requestAuthorization(types:)`, which would replace the SDK's persisted tracked-type set. Its report contains only counts, native types, elapsed-offset durations, and 8-hex hash prefixes.
+* **`Examples/EnrichmentDiagnostic/`**: SwiftUI device diagnostic (outside the SPM target) for the physical-device proof.
+* **CoreLocation** added to the linked frameworks in `Package.swift` and the podspec, for `CLLocation` route points.
+
+No existing sync, serialization, or authorization behaviour changed.
+
 ## 0.14.0
 
 * **Fixed full export poisoning**: when the first upload of a full export failed (offline, backend down, app killed), subsequent triggers overwrote the session as incremental without anchors — causing an infinite re-upload loop of old data. Full-export mode is now sticky until completed; already-poisoned devices self-heal.

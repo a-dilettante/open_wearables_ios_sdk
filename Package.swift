@@ -14,6 +14,8 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("HealthKit"),
                 .linkedFramework("BackgroundTasks"),
+                // Workout routes are delivered as CLLocation values.
+                .linkedFramework("CoreLocation"),
             ]
         ),
         .testTarget(
