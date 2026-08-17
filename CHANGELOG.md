@@ -1,6 +1,66 @@
 # Changelog
 
-## Unreleased
+## Unreleased — 0.15.0
+
+### Workout-detail enrichment (additive pipeline)
+
+New opt-in pipeline that publishes workout-owned routes, heart-rate streams, events,
+and activities to OW as immutable generations. It runs beside the core sync engine and
+never inside it: the round-robin, its 100/2,000 budgets, its anchors, and its
+serializers are untouched, and an enrichment pass is skipped outright whenever a core
+sync is running.
+
+* **Public API**: `setWorkoutDetailEnrichmentEnabled(_:)`,
+  `requestWorkoutDetailAuthorization()`, `getWorkoutDetailEnrichmentStatus()`, and
+  `startWorkoutDetailEnrichmentPass()`. Authorization asks `HKHealthStore` directly for
+  workout + workout route + heart rate; it never routes through
+  `requestAuthorization(types:)`, which replaces the SDK's persisted tracked-type set
+  and would silently shrink a host app's core sync. The status dictionary carries counts,
+  low-cardinality error classes, and historical progress — no identifier, coordinate,
+  sample value, or file name.
+* **Independent discovery**: an enrichment-owned `HKQueryAnchor` on `workoutType`, stored
+  in the detail checkpoint rather than alongside the core anchors. It advances only in the
+  same checkpoint write that persists the jobs and tombstones the query produced, and
+  `resetAnchors()` deliberately leaves it alone — a global anchor reset must never be how
+  a device discovers newly supported detail.
+* **Bounded collection**: two workouts enriched at a time through the Phase 0 reader.
+  Late-route reconciliation re-reads workouts published with a pending or absent route for
+  14 days, so a route written after its workout is picked up on the next foreground or
+  workout-observer wake. Historical enrichment walks 7-day windows newest-first across a
+  90-day lookback, resumable from a durable cursor.
+* **File-backed staging**: per-upload directory holding a manifest and gzipped columnar
+  chunks, bounded by measured serialized bytes (1 MiB target) *and* point count (16,384).
+  Chunk bodies are hand-serialized at fixed precision so the same workout always produces
+  identical bytes; checksums cover the uncompressed form, which is what the server
+  re-derives after inflating. Every file is excluded from backup, marked
+  complete-until-first-user-authentication, and removed on terminal receipt, sign-out,
+  user switch, disable, or 7-day expiry.
+* **Transport**: `PUT` manifest → `PUT` chunks through the existing background
+  `URLSession` from files → `POST` complete → `GET` receipt. A workout is recorded as
+  published or noop **only** on that terminal receipt; HTTP acceptance of chunks is not
+  publication. A 404 means the server feature flag is off and defers with backoff while
+  keeping all durable state — never a dead letter. A manifest 409 fails permanently; a
+  chunk 409 re-derives the upload from a fresh read; 401 reuses the existing token
+  refresh. Background task descriptions carry an 8-hex upload-id prefix and a file name
+  only — no path, user id, or workout identity.
+* **Never clears published data**: a family with no points is omitted from the manifest
+  rather than sent empty, because an empty HealthKit read is indistinguishable from a
+  denied one and an empty family could be read as a deletion. A workout with no route
+  still publishes its heart rate, events, and activities.
+* **Honest reduction**: heart rate is published for one source per stream (a watch and a
+  chest strap are never merged into one fabricated sensor) and an event type the contract
+  cannot express is dropped rather than flattened into a neighbouring type. Both cases
+  report the family as `partial`.
+* **Per-user isolation**: the checkpoint and staged files are deleted on sign-out and when
+  signing in as a different user. There is no cross-account recovery path.
+* **Telemetry** on the existing `/logs` channel: pass start/end with counts by family,
+  byte totals, durations, and error classes. No identifiers, no coordinates.
+* **Integration seams** are four one-line hooks plus an `"enrich|"` prefix branch in the
+  URL-session delegate. No new `HKObserverQuery` type is registered and routes are
+  deliberately not observed — direct route background wakes are unverified, so late routes
+  rely on workout observers and foreground reconciliation.
+
+### Workout-detail capture harness (Phase 0)
 
 * **Workout-detail capture harness (Phase 0, additive)**: new `Internal/WorkoutDetail/` reads HealthKit workout routes, workout-associated heart rate, native events, and iOS 16+ workout activities into typed models. Routes are read via the workout-association predicate across every `HKWorkoutRouteQuery` batch and every route object; heart rate uses the workout-association predicate (never a time window) and expands condensed samples with `HKQuantitySeriesSampleQuery`, preserving interval semantics. Each family reports its own availability (`available`/`partial`/`pending_enrichment`/`not_available_or_not_authorized`/`invalid`) — never a permission outcome, which Apple does not expose.
 * **Deterministic family hashing**: canonical serialization plus SHA-256 hashes per family and a root hash. Ordering is by elapsed offset then ordinal; no absolute timestamp enters a hash.
