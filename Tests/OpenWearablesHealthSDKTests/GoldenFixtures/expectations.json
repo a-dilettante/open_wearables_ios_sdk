@@ -1,0 +1,66 @@
+{
+  "chunks" : [
+    {
+      "checksum" : "2760e27b165f6941b173e9b8b0dda4da0cf04ef8fe5685aa32bce88f38029fbc",
+      "chunk_index" : 0,
+      "compressed_bytes" : 5303,
+      "family" : "heart_rate",
+      "file_name" : "heart_rate_chunk000.json.gz",
+      "part_index" : null,
+      "point_count" : 600,
+      "uncompressed_bytes" : 24825
+    },
+    {
+      "checksum" : "08b11d3c665f79db6bdf58ac9884f77155782de8568045f38c6f56c9e0cf65b8",
+      "chunk_index" : 0,
+      "compressed_bytes" : 27921,
+      "family" : "route",
+      "file_name" : "route_p0_chunk000.json.gz",
+      "part_index" : 0,
+      "point_count" : 820,
+      "uncompressed_bytes" : 66352
+    },
+    {
+      "checksum" : "871fa9bc8a7543e5a4f04a457ee5b9d95b77c5ea1dc2d4e9a92c6571f8126fd0",
+      "chunk_index" : 1,
+      "compressed_bytes" : 15902,
+      "family" : "route",
+      "file_name" : "route_p1_chunk001.json.gz",
+      "part_index" : 1,
+      "point_count" : 460,
+      "uncompressed_bytes" : 37802
+    }
+  ],
+  "family_hashes" : {
+    "activities" : "079a54c0db4bba9ebc5a284588091c1367e195d9ae530141c1f9ddd5f9c5f726",
+    "events" : "b37f6e12250064b612a287f98b49e88017d4da43651edd652e23d9b0eef5f128",
+    "heart_rate" : "84c01bf57e12b977d7e3608907ad9e28005151f03c8e31c868d6bc95493eae1b",
+    "route" : "77916fc1c09fe86da5d998df8c9e1f3412d125acb50e6c822a63751dfb9f50b2"
+  },
+  "heart_rate" : {
+    "axis" : "interval",
+    "chunk_count" : 1,
+    "point_count" : 600
+  },
+  "identity_key" : "apple|com.example.goldenrecorder|golden-sync-0001",
+  "manifest_sha256" : "62b0f26a4bc14659208e5e043fedd24c3d905ef68adf83c9c3733207cbfed17d",
+  "root_hash" : "d88d0d344532a72a32d684156a03b1914d0a05fb148e173c2fb2538f13820692",
+  "route" : {
+    "chunk_count" : 2,
+    "parts" : [
+      {
+        "content_hash" : "ce64124148cb748a69cb99776468d49711f8f83fabd19a1c83ec91b59d8bb11e",
+        "part_index" : 0,
+        "point_count" : 820
+      },
+      {
+        "content_hash" : "44ad4398e8d02675cb46da5da84c3eb3f9a3973f0db54f608566bfe98b38eb57",
+        "part_index" : 1,
+        "point_count" : 460
+      }
+    ],
+    "point_count" : 1280
+  },
+  "schema_version" : 1,
+  "upload_id" : "7f87e3238475fd01e03d05eeeba3a34b"
+}

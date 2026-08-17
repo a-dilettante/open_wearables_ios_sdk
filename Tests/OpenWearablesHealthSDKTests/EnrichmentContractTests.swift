@@ -60,28 +60,44 @@ final class EnrichmentContractTests: XCTestCase {
 
     private func buildManifest() -> [String: Any] {
         let prepared = EnrichmentPreparation.prepare(WorkoutDetailTestFixtures.detail()).detail
-        let hashes = WorkoutDetailHashing.hashes(for: prepared)
         let points = WorkoutDetailTestFixtures.allRoutePoints(prepared)
+        // Stand-in chunk checksums: this test asserts the manifest *shape*, and the real
+        // checksums only exist once the outbox has encoded the bodies.
+        let checksums = ["a", "b"].map { WorkoutDetailHashing.sha256Hex($0) }
+
+        var partHashes: [Int: String] = [:]
+        let partSummaries = prepared.route.parts.enumerated().map { index, part -> EnrichmentRoutePartSummary in
+            let hash = EnrichmentContentHash.routePart(
+                partIndex: index,
+                pointCount: part.points.count,
+                chunkChecksums: [checksums[index]]
+            )
+            partHashes[index] = hash
+            return EnrichmentRoutePartSummary(
+                partIndex: index,
+                sourceRouteUUID: part.routeUUID,
+                pointCount: part.points.count,
+                contentHash: hash
+            )
+        }
 
         let route = EnrichmentRouteSummary(
-            contentHash: hashes.route,
-            chunkCount: 1,
+            contentHash: EnrichmentContentHash.routeFamily(pointCount: points.count, partHashes: partHashes),
+            chunkCount: partSummaries.count,
             pointCount: points.count,
             uncompressedBytes: 2048,
             availability: .available,
             gapCount: max(0, prepared.route.parts.count - 1),
             bounds: (51.0, 52.0, -1.0, 0.0),
-            parts: prepared.route.parts.map {
-                EnrichmentRoutePartSummary(
-                    partIndex: $0.partIndex,
-                    sourceRouteUUID: $0.routeUUID,
-                    pointCount: $0.points.count,
-                    contentHash: EnrichmentManifestBuilder.routePartHash($0)
-                )
-            }
+            parts: partSummaries
         )
         let heartRate = EnrichmentStreamSummary(
-            contentHash: hashes.heartRate,
+            contentHash: EnrichmentContentHash.streamFamily(
+                metric: prepared.heartRate.metric,
+                sourceKey: prepared.heartRate.entries[0].sourceKey,
+                pointCount: prepared.heartRate.entries.count,
+                chunkChecksums: [checksums[0]]
+            ),
             chunkCount: 1,
             pointCount: prepared.heartRate.entries.count,
             uncompressedBytes: 512,
@@ -96,11 +112,14 @@ final class EnrichmentContractTests: XCTestCase {
 
         return EnrichmentManifestBuilder.build(
             detail: prepared,
-            hashes: hashes,
             route: route,
             heartRate: heartRate,
-            includeEvents: true,
-            includeActivities: true
+            eventsHash: EnrichmentContentHash.eventsFamily(
+                contentIDs: EnrichmentManifestBuilder.eventContentIDs(prepared)
+            ),
+            activitiesHash: EnrichmentContentHash.activitiesFamily(
+                contentHashes: EnrichmentManifestBuilder.activityContentHashes(prepared)
+            )
         )
     }
 
@@ -198,11 +217,12 @@ final class EnrichmentContractTests: XCTestCase {
         let prepared = EnrichmentPreparation.prepare(WorkoutDetailTestFixtures.detail()).detail
         let manifest = EnrichmentManifestBuilder.build(
             detail: prepared,
-            hashes: WorkoutDetailHashing.hashes(for: prepared),
             route: nil,
             heartRate: nil,
-            includeEvents: false,
-            includeActivities: true
+            eventsHash: nil,
+            activitiesHash: EnrichmentContentHash.activitiesFamily(
+                contentHashes: EnrichmentManifestBuilder.activityContentHashes(prepared)
+            )
         )
 
         XCTAssertEqual(

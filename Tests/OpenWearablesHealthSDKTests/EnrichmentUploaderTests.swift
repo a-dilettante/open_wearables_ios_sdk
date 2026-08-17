@@ -47,12 +47,39 @@ final class EnrichmentUploaderTests: XCTestCase {
     func testServerLimitsAndTransientsAreClassified() {
         XCTAssertEqual(EnrichmentUploader.classify(statusCode: 413, phase: .chunk), .permanent("payload_too_large"))
         XCTAssertEqual(EnrichmentUploader.classify(statusCode: 422, phase: .chunk), .permanent("validation_failed"))
-        XCTAssertEqual(EnrichmentUploader.classify(statusCode: 400, phase: .chunk), .permanent("http_4xx"))
+        XCTAssertEqual(EnrichmentUploader.classify(statusCode: 405, phase: .chunk), .permanent("http_4xx"))
         XCTAssertEqual(EnrichmentUploader.classify(statusCode: 401, phase: .manifest), .unauthorized)
         XCTAssertEqual(EnrichmentUploader.classify(statusCode: 403, phase: .manifest), .unauthorized)
         XCTAssertEqual(EnrichmentUploader.classify(statusCode: 500, phase: .complete), .transient("http_5xx"))
         XCTAssertEqual(EnrichmentUploader.classify(statusCode: 503, phase: .complete), .transient("http_5xx"))
         XCTAssertEqual(EnrichmentUploader.classify(statusCode: 0, phase: .complete), .transient("no_response"))
+    }
+
+    /// 400, 413 and 422 are three ways of saying "these exact bytes will never be
+    /// accepted", and all three must be terminal.
+    ///
+    /// 400 is the one that is easy to get wrong. OW converts FastAPI's
+    /// `RequestValidationError` into a 400 rather than the framework's own 422, so every
+    /// schema rejection — an unknown manifest field, an availability that cannot carry
+    /// chunks, overlapping laps — arrives as 400. Retrying it would replay the same
+    /// rejection until the outbox expired.
+    func testSchemaRejectionsAreTerminalInEveryPhase() {
+        for phase in [EnrichmentUploadPhase.manifest, .chunk, .complete, .receipt, .tombstone] {
+            for status in [400, 413, 422] {
+                let outcome = EnrichmentUploader.classify(statusCode: status, phase: phase)
+                guard case .permanent = outcome else {
+                    XCTFail("HTTP \(status) in \(phase.rawValue) must be terminal, got \(outcome)")
+                    continue
+                }
+
+                // Terminal means the job stops, not that it waits longer.
+                let job = EnrichmentUploader.apply(outcome: outcome, phase: phase, to: makeJob(), now: now)
+                XCTAssertEqual(job.state, .failedPermanent, "HTTP \(status) in \(phase.rawValue)")
+                XCTAssertNil(job.nextAttemptAt, "a terminal rejection must not schedule a retry")
+            }
+        }
+
+        XCTAssertEqual(EnrichmentUploader.classify(statusCode: 400, phase: .manifest).errorClass, "schema_rejected")
     }
 
     // MARK: - Backoff

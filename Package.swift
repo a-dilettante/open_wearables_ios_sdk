@@ -20,7 +20,11 @@ let package = Package(
         ),
         .testTarget(
             name: "OpenWearablesHealthSDKTests",
-            dependencies: ["OpenWearablesHealthSDK"]
+            dependencies: ["OpenWearablesHealthSDK"],
+            // Committed wire bytes for the cross-repo conformance fixture. Declared so the
+            // build treats them as data rather than as unhandled files; the generating test
+            // reads and rewrites them in the source tree, not in the bundle.
+            resources: [.copy("GoldenFixtures")]
         ),
     ]
 )

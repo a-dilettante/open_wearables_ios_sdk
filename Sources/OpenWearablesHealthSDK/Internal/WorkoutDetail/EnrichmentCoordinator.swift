@@ -84,9 +84,7 @@ final class EnrichmentCoordinator {
         Task { [weak self] in
             guard let self else { return }
             await self.performPass(reason: reason)
-            self.passLock.lock()
-            self.isPassRunning = false
-            self.passLock.unlock()
+            self.finishPass()
             completion?()
         }
     }
@@ -107,6 +105,18 @@ final class EnrichmentCoordinator {
         isPassRunning = true
         lastPassStartedAt = Date()
         return true
+    }
+
+    /// Releases the single-flight latch.
+    ///
+    /// Both sides of the latch live in a synchronous method on purpose. Taking an
+    /// `NSLock` directly inside the pass `Task` blocks a cooperative thread and is an
+    /// error under the Swift 6 language mode; keeping the critical section — two field
+    /// writes, no I/O — outside the asynchronous context avoids both.
+    private func finishPass() {
+        passLock.lock()
+        defer { passLock.unlock() }
+        isPassRunning = false
     }
 
     private func performPass(reason: String) async {
@@ -296,11 +306,7 @@ final class EnrichmentCoordinator {
         let now = Date()
 
         let due = checkpoint.load(userKey: userKey).jobs
-            .filter { _, job in
-                guard job.state == .pending else { return false }
-                if let next = job.nextAttemptAt, next > now { return false }
-                return true
-            }
+            .filter { Self.isDueForCollection($0.value, now: now) }
             // Newest workouts first: recent activity is what a user is looking at.
             .sorted { $0.value.workoutEndDate > $1.value.workoutEndDate }
             .map { $0.key }
@@ -402,15 +408,38 @@ final class EnrichmentCoordinator {
         )
     }
 
+    /// Backs a job off after a failure during **collection**, and leaves it collectable.
+    ///
+    /// A collection-phase failure happens before there is an upload id, so the job has to
+    /// go back to `pending`: `deferred` is the upload-phase state, and the only thing that
+    /// revisits a deferred job is `resumeInFlightUploads`, which needs an upload id to
+    /// nudge. A job parked in `deferred` with no upload id would be picked up by neither
+    /// loop and would sit in the checkpoint until it was pruned, never retried.
+    ///
+    /// `nextAttemptAt` is what makes this a back-off rather than a hot loop, and
+    /// ``isDueForCollection(_:now:)`` is the one place it is honoured.
+    static func deferCollection(_ job: EnrichmentJob, errorClass: String, now: Date = Date()) -> EnrichmentJob {
+        var updated = job
+        updated.state = .pending
+        updated.uploadID = nil
+        updated.attemptCount += 1
+        updated.lastErrorClass = errorClass
+        updated.nextAttemptAt = now.addingTimeInterval(EnrichmentUploader.backoff(attempt: updated.attemptCount))
+        updated.updatedAt = now
+        return updated
+    }
+
+    /// Whether a job is waiting to be read from HealthKit and its back-off has elapsed.
+    static func isDueForCollection(_ job: EnrichmentJob, now: Date) -> Bool {
+        guard job.state == .pending else { return false }
+        if let next = job.nextAttemptAt, next > now { return false }
+        return true
+    }
+
     private func markDeferred(identityKey: String, errorClass: String) {
         checkpoint.mutate(userKey: sdk.userKey()) { state in
-            guard var current = state.jobs[identityKey] else { return }
-            current.state = .deferred
-            current.attemptCount += 1
-            current.lastErrorClass = errorClass
-            current.nextAttemptAt = Date().addingTimeInterval(EnrichmentUploader.backoff(attempt: current.attemptCount))
-            current.updatedAt = Date()
-            state.jobs[identityKey] = current
+            guard let current = state.jobs[identityKey] else { return }
+            state.jobs[identityKey] = Self.deferCollection(current, errorClass: errorClass)
         }
     }
 
