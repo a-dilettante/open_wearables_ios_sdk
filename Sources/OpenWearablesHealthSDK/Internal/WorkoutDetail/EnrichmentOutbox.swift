@@ -32,6 +32,10 @@ struct EnrichmentUploadIndex: Codable, Equatable {
     var manifestChecksum: String
     var isManifestAccepted: Bool
     var isCompleteRequested: Bool
+    /// Route availability this upload represents, recorded even when the route family is
+    /// omitted from the manifest. Late-route reconciliation needs it after the receipt
+    /// arrives, and the manifest alone cannot express "omitted because still pending".
+    var routeAvailability: String
     var createdAt: Date
     var chunks: [EnrichmentChunkRecord]
 
@@ -282,7 +286,13 @@ final class EnrichmentOutbox {
         }
 
         let routePointCount = orderedParts.reduce(0) { $0 + $1.points.count }
-        let routeSummary: EnrichmentRouteSummary? = (routePointCount > 0 || routeAvailability == .pendingEnrichment)
+
+        // A family with no points is omitted, never sent empty. An empty read can mean
+        // the source has not written the route yet, or that access is missing — Apple
+        // makes those indistinguishable — and declaring an empty family would invite the
+        // server to clear a route it already published (brief 6.4). Omission is the one
+        // encoding that provably leaves published data alone.
+        let routeSummary: EnrichmentRouteSummary? = routePointCount > 0
             ? EnrichmentRouteSummary(
                 contentHash: hashes.route,
                 chunkCount: routeChunkIndex,
@@ -378,6 +388,7 @@ final class EnrichmentOutbox {
             manifestChecksum: WorkoutDetailHashing.sha256Hex(manifestData),
             isManifestAccepted: false,
             isCompleteRequested: false,
+            routeAvailability: routeAvailability.rawValue,
             createdAt: now,
             chunks: records
         )

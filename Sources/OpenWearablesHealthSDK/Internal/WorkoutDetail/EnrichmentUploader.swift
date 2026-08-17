@@ -417,18 +417,14 @@ final class EnrichmentUploader {
         }
     }
 
-    /// Reads back the availability this upload actually published for the route family,
-    /// so reconciliation knows whether to keep watching this workout.
+    /// The route availability this upload represents, so reconciliation knows whether to
+    /// keep watching this workout.
+    ///
+    /// Read from the durable index rather than the manifest: a route that has not
+    /// arrived is deliberately *omitted* from the manifest so the server cannot mistake
+    /// an empty read for a deletion, which leaves the manifest unable to express it.
     private func stagedRouteAvailability(uploadID: String) -> WorkoutDetailAvailability? {
-        guard let data = try? Data(contentsOf: outbox.manifestURL(uploadID)),
-              let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let families = manifest["families"] as? [String: Any],
-              let route = families[WorkoutDetailFamily.route.rawValue] as? [String: Any],
-              let raw = route["availability"] as? String else {
-            // Route was omitted from this upload entirely.
-            return nil
-        }
-        return WorkoutDetailAvailability(rawValue: raw)
+        outbox.loadIndex(uploadID: uploadID).flatMap { WorkoutDetailAvailability(rawValue: $0.routeAvailability) }
     }
 
     // MARK: Tombstones
