@@ -26,6 +26,15 @@ extension OpenWearablesHealthSDK {
                 }
 
                 self.triggerCombinedSync()
+
+                // Workout-detail enrichment piggybacks on the workout observer that
+                // already exists. No new observer type is registered, and routes are
+                // deliberately not observed: direct route background wakes are
+                // unverified, so late routes are found by foreground reconciliation.
+                if type.identifier == HKObjectType.workoutType().identifier {
+                    self.triggerEnrichmentPass(reason: "observer", debounce: 60)
+                }
+
                 completionHandler()
             }
             healthStore.execute(observer)
