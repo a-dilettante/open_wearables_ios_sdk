@@ -4,6 +4,19 @@ import CryptoKit
 /// Deterministic canonical serialization and SHA-256 family hashes for collected
 /// workout detail.
 ///
+/// ## Scope: device-local, not the wire contract
+///
+/// These digests fingerprint what the reader *collected*, over a canonical text form of
+/// the in-memory model. They are used for diagnostics, the redaction fixtures, and the
+/// probe report, and they are the reason two reads of the same workout are recognisably
+/// the same read.
+///
+/// They are **not** the hashes a manifest declares. A wire family hash is a function of
+/// the bytes that get uploaded — the chunk checksums, the inline entry content ids — so
+/// that the server can recompute it from what actually arrived without reproducing this
+/// text format. That recipe lives in ``EnrichmentContentHash`` and is mirrored from the
+/// server's `hashing.py`. Do not use anything here as a `content_hash` on the wire.
+///
 /// ## Ordering rules
 ///
 /// Hashing must not depend on the order HealthKit happened to deliver objects, so

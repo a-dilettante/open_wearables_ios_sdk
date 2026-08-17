@@ -66,10 +66,29 @@ final class EnrichmentUploader {
 
     // MARK: - Pure: classification
 
+    /// Maps a status code onto what the pipeline should do next.
+    ///
+    /// **400, 413 and 422 are all terminal.** They are three different ways for the server
+    /// to say these exact bytes will never be accepted, and retrying any of them just
+    /// replays the same rejection until the outbox expires:
+    ///
+    /// * `400` — the manifest or chunk body failed schema validation. OW's application
+    ///   level handler converts FastAPI's `RequestValidationError` into a 400, *not* the
+    ///   422 the framework would return on its own, so a client that only treats 422 as
+    ///   terminal would retry every schema rejection forever.
+    /// * `413` — the compressed chunk is over the request-size ceiling. Re-sending the
+    ///   same file cannot make it smaller.
+    /// * `422` — a transport or payload check the service itself rejected (bad gzip,
+    ///   checksum mismatch, an undeclared family or chunk index).
+    ///
+    /// A terminal outcome drops the staging area; the coordinator decides on its own
+    /// whether the workout is worth re-reading from HealthKit.
     static func classify(statusCode: Int, phase: EnrichmentUploadPhase) -> EnrichmentUploadOutcome {
         if (200...299).contains(statusCode) { return .accepted }
 
         switch statusCode {
+        case 400:
+            return .permanent("schema_rejected")
         case 401, 403:
             return .unauthorized
         case 404:

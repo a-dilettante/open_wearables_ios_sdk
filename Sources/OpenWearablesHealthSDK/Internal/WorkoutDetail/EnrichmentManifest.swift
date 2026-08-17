@@ -180,7 +180,10 @@ enum EnrichmentUploadID {
     /// Same content retried yields the same upload, so a replay is idempotent; richer
     /// content yields a different root hash and therefore a new upload.
     static func derive(identityKey: String, rootContentHash: String) -> String {
-        String(WorkoutDetailHashing.sha256Hex("owd1|\(identityKey)|\(rootContentHash)").prefix(32))
+        let digest = WorkoutDetailHashing.sha256Hex(
+            "\(EnrichmentContentHash.prefix)|\(identityKey)|\(rootContentHash)"
+        )
+        return String(digest.prefix(32))
     }
 
     /// Short, non-reversible label safe for `taskDescription` and telemetry.
@@ -386,16 +389,20 @@ enum EnrichmentManifestBuilder {
 
     /// Builds the manifest body for a prepared detail.
     ///
+    /// Each family hash is passed in rather than derived here, because a wire hash is a
+    /// function of the bytes that will be uploaded — the chunk checksums for a dense
+    /// family, the entry content ids for an inline one — and only the outbox has those.
+    /// A `nil` hash means the family is omitted.
+    ///
     /// `omittedFamilies` lists families this upload deliberately does not address, which
     /// the server reads as "leave the published family unchanged" — the mechanism that
     /// lets a late route be published without re-uploading an unchanged heart-rate stream.
     static func build(
         detail: CollectedWorkoutDetail,
-        hashes: WorkoutDetailHashing.Hashes,
         route: EnrichmentRouteSummary?,
         heartRate: EnrichmentStreamSummary?,
-        includeEvents: Bool,
-        includeActivities: Bool
+        eventsHash: String?,
+        activitiesHash: String?
     ) -> [String: Any] {
         var families: [String: Any] = [:]
         var omitted: [String] = []
@@ -412,14 +419,14 @@ enum EnrichmentManifestBuilder {
             omitted.append(WorkoutDetailFamily.heartRate.rawValue)
         }
 
-        if includeEvents {
-            families[WorkoutDetailFamily.events.rawValue] = eventsObject(detail, hash: hashes.events)
+        if let eventsHash {
+            families[WorkoutDetailFamily.events.rawValue] = eventsObject(detail, hash: eventsHash)
         } else {
             omitted.append(WorkoutDetailFamily.events.rawValue)
         }
 
-        if includeActivities {
-            families[WorkoutDetailFamily.activities.rawValue] = activitiesObject(detail, hash: hashes.activities)
+        if let activitiesHash {
+            families[WorkoutDetailFamily.activities.rawValue] = activitiesObject(detail, hash: activitiesHash)
         } else {
             omitted.append(WorkoutDetailFamily.activities.rawValue)
         }
@@ -434,19 +441,46 @@ enum EnrichmentManifestBuilder {
 
     // MARK: Inline families
 
+    /// The events this manifest can carry, in wire order: canonically sorted, with the
+    /// native types the contract has no slot for already dropped.
+    ///
+    /// The entry list and the family hash are both derived from this one sequence. Walking
+    /// the events twice with two filters is exactly how a device ends up declaring a hash
+    /// the server cannot reproduce.
+    static func wireEvents(_ detail: CollectedWorkoutDetail) -> [(event: WorkoutEventEntry, type: String)] {
+        WorkoutDetailHashing.sortedEvents(detail.events.events).compactMap { event in
+            EnrichmentWire.wireEventType(forHealthKitRawValue: event.typeRawValue).map { (event, $0) }
+        }
+    }
+
+    /// The activities this manifest carries, in wire order.
+    static func wireActivities(_ detail: CollectedWorkoutDetail) -> [WorkoutActivityEntry] {
+        WorkoutDetailHashing.sortedActivities(detail.activities.activities)
+    }
+
+    /// Per-entry content ids in wire order — the input to the events family hash.
+    static func eventContentIDs(_ detail: CollectedWorkoutDetail) -> [String] {
+        wireEvents(detail).map { eventContentID($0.event) }
+    }
+
+    /// Per-entry content hashes in wire order — the input to the activities family hash.
+    static func activityContentHashes(_ detail: CollectedWorkoutDetail) -> [String] {
+        wireActivities(detail).map(activityContentHash)
+    }
+
     static func eventsObject(_ detail: CollectedWorkoutDetail, hash: String) -> [String: Any] {
         let offset = detail.identity.timeZoneOffsetSeconds
-        let entries = WorkoutDetailHashing.sortedEvents(detail.events.events)
+        let entries = wireEvents(detail)
             .enumerated()
-            .compactMap { index, event -> [String: Any]? in
-                guard let type = EnrichmentWire.wireEventType(forHealthKitRawValue: event.typeRawValue) else { return nil }
+            .map { index, wire -> [String: Any] in
+                let event = wire.event
 
                 // A zero-duration legacy lap marker keeps its zero duration: it is
                 // reported with no end rather than widened into a synthetic interval.
                 let hasEnd = !event.isZeroDuration
                 var object: [String: Any] = [
                     "event_index": index,
-                    "event_type": type,
+                    "event_type": wire.type,
                     "start_timestamp": EnrichmentWire.timestamp(event.startDate, offsetSeconds: offset),
                     "end_timestamp": hasEnd
                         ? EnrichmentWire.timestamp(event.endDate, offsetSeconds: offset) as Any
@@ -466,7 +500,7 @@ enum EnrichmentManifestBuilder {
 
     static func activitiesObject(_ detail: CollectedWorkoutDetail, hash: String) -> [String: Any] {
         let offset = detail.identity.timeZoneOffsetSeconds
-        let entries = WorkoutDetailHashing.sortedActivities(detail.activities.activities).map { activity -> [String: Any] in
+        let entries = wireActivities(detail).map { activity -> [String: Any] in
             var object: [String: Any] = [
                 "position": activity.position,
                 "activity_uuid": activity.activityUUID.isEmpty ? NSNull() : activity.activityUUID,
@@ -539,14 +573,6 @@ enum EnrichmentManifestBuilder {
                 + "|\(WorkoutDetailHashing.num(statistic.value))|\(statistic.unit)"
         }
         return WorkoutDetailHashing.sha256Hex(canonical)
-    }
-
-    /// Per-route-object hash, so a manifest can prove which route part changed without
-    /// re-hashing the whole family.
-    static func routePartHash(_ part: RoutePart) -> String {
-        WorkoutDetailHashing.sha256Hex(
-            WorkoutDetailHashing.canonicalRoute(WorkoutRouteDetail(availability: .available, parts: [part]))
-        )
     }
 
     /// Paused spans declared by the workout's own pause/resume events, in microseconds.

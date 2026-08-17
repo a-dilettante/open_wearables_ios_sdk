@@ -225,67 +225,115 @@ final class EnrichmentOutbox {
         case writeFailed
     }
 
+    /// One chunk, described completely before anything is written to disk.
+    ///
+    /// The upload directory is named after the upload id, the upload id comes from the
+    /// root hash, and the root hash is built from these checksums — so a chunk has to be
+    /// measured before there is anywhere to put it. `makeBody` re-encodes on demand rather
+    /// than holding the bytes, which keeps peak memory at one chunk; the encoder is
+    /// deterministic, so the measured body and the written body are the same bytes, and
+    /// `writeChunk` re-checks that rather than assuming it.
+    private struct PlannedChunk {
+        var family: String
+        var chunkIndex: Int
+        var partIndex: Int?
+        var fileName: String
+        var checksum: String
+        var uncompressedBytes: Int
+        var pointCount: Int
+        var makeBody: () -> Data
+    }
+
+    private static func plan(
+        family: String,
+        chunkIndex: Int,
+        partIndex: Int?,
+        fileName: String,
+        pointCount: Int,
+        makeBody: @escaping () -> Data
+    ) -> PlannedChunk {
+        // The checksum covers the uncompressed bytes, which is what the server re-derives
+        // after inflating — checksumming the compressed form would not detect a bad
+        // decompression, and two gzip encoders disagree on identical input.
+        let body = makeBody()
+        return PlannedChunk(
+            family: family,
+            chunkIndex: chunkIndex,
+            partIndex: partIndex,
+            fileName: fileName,
+            checksum: WorkoutDetailHashing.sha256Hex(body),
+            uncompressedBytes: body.count,
+            pointCount: pointCount,
+            makeBody: makeBody
+        )
+    }
+
     /// Writes the manifest and every chunk file for one collected workout.
     ///
-    /// Chunks are encoded, compressed, and written one at a time and each buffer is
-    /// released before the next is built, so peak memory is one chunk rather than the
-    /// whole archive.
+    /// Chunks are planned first and written second. Every family hash in the manifest is a
+    /// digest of the chunk checksums the server will re-derive from the bytes it receives,
+    /// so the hashes cannot be computed from the in-memory detail — they only exist once
+    /// the wire bodies do. Only one chunk body is ever in memory, in either pass.
     func stage(
         detail: CollectedWorkoutDetail,
         routeAvailability: WorkoutDetailAvailability,
         now: Date = Date()
     ) throws -> StagedEnrichmentUpload {
-        let hashes = WorkoutDetailHashing.hashes(for: detail)
         let identity = EnrichmentIdentityEnvelope(detail.identity)
-        let uploadID = EnrichmentUploadID.derive(identityKey: identity.identityKey, rootContentHash: hashes.root)
 
-        let uploadDirectory = uploadDirectory(uploadID)
-        // A re-stage of the same content replaces the directory wholesale: identical
-        // input reproduces identical bytes, so there is nothing to preserve.
-        try? FileManager.default.removeItem(at: uploadDirectory)
-        try? FileManager.default.createDirectory(at: uploadDirectory, withIntermediateDirectories: true)
-        EnrichmentFileProtection.apply(to: directory)
-        EnrichmentFileProtection.apply(to: uploadDirectory)
-
-        var records: [EnrichmentChunkRecord] = []
-
-        // Route — chunk indices run across the whole family, parts stay identified.
+        // --- Plan: route ------------------------------------------------------
+        //
+        // Chunk indices run across the whole family so the server can prove every promised
+        // chunk arrived from `chunk_count` alone; `part_index` still says which route
+        // object a chunk belongs to. Parts with no points are dropped and the survivors are
+        // numbered from zero, because the contract requires contiguous part indices and a
+        // declared part with no chunk is rejected as an incomplete upload.
+        var planned: [PlannedChunk] = []
         var routeChunkIndex = 0
-        var routeUncompressed = 0
-        let orderedParts = WorkoutDetailHashing.sortedParts(detail.route.parts)
         var partSummaries: [EnrichmentRoutePartSummary] = []
+        var partHashes: [Int: String] = [:]
 
-        for part in orderedParts {
+        let orderedParts = WorkoutDetailHashing.sortedParts(detail.route.parts).filter { !$0.points.isEmpty }
+
+        for (wirePartIndex, part) in orderedParts.enumerated() {
             let points = WorkoutDetailHashing.sortedPoints(part.points)
-            partSummaries.append(EnrichmentRoutePartSummary(
-                partIndex: part.partIndex,
-                sourceRouteUUID: part.routeUUID.isEmpty ? nil : part.routeUUID,
-                pointCount: points.count,
-                contentHash: EnrichmentManifestBuilder.routePartHash(part)
-            ))
+            var partChecksums: [String] = []
 
             for range in EnrichmentChunkEncoder.split(points, cost: EnrichmentChunkEncoder.routePointCost) {
-                let body = EnrichmentChunkEncoder.routeChunkBody(
-                    partIndex: part.partIndex,
-                    points: Array(points[range])
-                )
-                let fileName = String(format: "route_p%d_chunk%03d.json.gz", part.partIndex, routeChunkIndex)
-                let record = try writeChunk(
-                    body: body,
+                let chunk = Self.plan(
                     family: WorkoutDetailFamily.route.rawValue,
                     chunkIndex: routeChunkIndex,
-                    partIndex: part.partIndex,
+                    partIndex: wirePartIndex,
+                    fileName: String(format: "route_p%d_chunk%03d.json.gz", wirePartIndex, routeChunkIndex),
                     pointCount: range.count,
-                    fileName: fileName,
-                    in: uploadDirectory
+                    makeBody: {
+                        EnrichmentChunkEncoder.routeChunkBody(
+                            partIndex: wirePartIndex,
+                            points: Array(points[range])
+                        )
+                    }
                 )
-                routeUncompressed += record.uncompressedBytes
-                records.append(record)
+                partChecksums.append(chunk.checksum)
+                planned.append(chunk)
                 routeChunkIndex += 1
             }
+
+            let partHash = EnrichmentContentHash.routePart(
+                partIndex: wirePartIndex,
+                pointCount: points.count,
+                chunkChecksums: partChecksums
+            )
+            partHashes[wirePartIndex] = partHash
+            partSummaries.append(EnrichmentRoutePartSummary(
+                partIndex: wirePartIndex,
+                sourceRouteUUID: part.routeUUID.isEmpty ? nil : part.routeUUID,
+                pointCount: points.count,
+                contentHash: partHash
+            ))
         }
 
         let routePointCount = orderedParts.reduce(0) { $0 + $1.points.count }
+        let routeUncompressed = planned.reduce(0) { $0 + $1.uncompressedBytes }
 
         // A family with no points is omitted, never sent empty. An empty read can mean
         // the source has not written the route yet, or that access is missing — Apple
@@ -294,7 +342,10 @@ final class EnrichmentOutbox {
         // encoding that provably leaves published data alone.
         let routeSummary: EnrichmentRouteSummary? = routePointCount > 0
             ? EnrichmentRouteSummary(
-                contentHash: hashes.route,
+                contentHash: EnrichmentContentHash.routeFamily(
+                    pointCount: routePointCount,
+                    partHashes: partHashes
+                ),
                 chunkCount: routeChunkIndex,
                 pointCount: routePointCount,
                 uncompressedBytes: routeUncompressed,
@@ -307,39 +358,44 @@ final class EnrichmentOutbox {
             )
             : nil
 
-        // Heart rate.
+        // --- Plan: heart rate -------------------------------------------------
         var heartRateChunkIndex = 0
+        var heartRateChecksums: [String] = []
         var heartRateUncompressed = 0
         let entries = WorkoutDetailHashing.sortedEntries(detail.heartRate.entries)
+        let metric = detail.heartRate.metric
 
         for range in EnrichmentChunkEncoder.split(entries, cost: EnrichmentChunkEncoder.quantityEntryCost) {
-            let body = EnrichmentChunkEncoder.streamChunkBody(
-                metric: detail.heartRate.metric,
-                entries: Array(entries[range])
-            )
-            let fileName = String(format: "heart_rate_chunk%03d.json.gz", heartRateChunkIndex)
-            let record = try writeChunk(
-                body: body,
+            let chunk = Self.plan(
                 family: WorkoutDetailFamily.heartRate.rawValue,
                 chunkIndex: heartRateChunkIndex,
                 partIndex: nil,
+                fileName: String(format: "heart_rate_chunk%03d.json.gz", heartRateChunkIndex),
                 pointCount: range.count,
-                fileName: fileName,
-                in: uploadDirectory
+                makeBody: {
+                    EnrichmentChunkEncoder.streamChunkBody(metric: metric, entries: Array(entries[range]))
+                }
             )
-            heartRateUncompressed += record.uncompressedBytes
-            records.append(record)
+            heartRateChecksums.append(chunk.checksum)
+            heartRateUncompressed += chunk.uncompressedBytes
+            planned.append(chunk)
             heartRateChunkIndex += 1
         }
 
         let heartRateSummary: EnrichmentStreamSummary? = entries.isEmpty ? nil : EnrichmentStreamSummary(
-            contentHash: hashes.heartRate,
+            contentHash: EnrichmentContentHash.streamFamily(
+                metric: metric,
+                // Preparation guarantees one source per stream, so the first entry's key is
+                // the stream's key — and it is inside the hash, so declaring a different
+                // one than the entries carry is a rejection rather than a silent merge.
+                sourceKey: entries[0].sourceKey,
+                pointCount: entries.count,
+                chunkChecksums: heartRateChecksums
+            ),
             chunkCount: heartRateChunkIndex,
             pointCount: entries.count,
             uncompressedBytes: heartRateUncompressed,
             availability: detail.heartRate.availability,
-            // Preparation guarantees one source per stream, so the first entry's key is
-            // the stream's key.
             sourceKey: entries[0].sourceKey,
             unit: entries[0].unit,
             axis: entries.contains { $0.kind == .interval } ? "interval" : "point",
@@ -354,14 +410,48 @@ final class EnrichmentOutbox {
             )
         )
 
-        // Manifest.
+        // --- Plan: inline families -------------------------------------------
+        let eventContentIDs = EnrichmentManifestBuilder.eventContentIDs(detail)
+        let activityContentHashes = EnrichmentManifestBuilder.activityContentHashes(detail)
+        let eventsHash = eventContentIDs.isEmpty
+            ? nil
+            : EnrichmentContentHash.eventsFamily(contentIDs: eventContentIDs)
+        let activitiesHash = activityContentHashes.isEmpty
+            ? nil
+            : EnrichmentContentHash.activitiesFamily(contentHashes: activityContentHashes)
+
+        // The root covers exactly the families this manifest declares. A family the server
+        // never sees must not be in it, or the device and the server would compute
+        // different roots for the same upload and every replay would look like new content.
+        var familyHashes: [String: String] = [:]
+        if let routeSummary { familyHashes[WorkoutDetailFamily.route.rawValue] = routeSummary.contentHash }
+        if let heartRateSummary { familyHashes[WorkoutDetailFamily.heartRate.rawValue] = heartRateSummary.contentHash }
+        if let eventsHash { familyHashes[WorkoutDetailFamily.events.rawValue] = eventsHash }
+        if let activitiesHash { familyHashes[WorkoutDetailFamily.activities.rawValue] = activitiesHash }
+
+        let rootHash = EnrichmentContentHash.root(familyHashes: familyHashes)
+        let uploadID = EnrichmentUploadID.derive(identityKey: identity.identityKey, rootContentHash: rootHash)
+
+        // --- Write ------------------------------------------------------------
+        let uploadDirectory = uploadDirectory(uploadID)
+        // A re-stage of the same content replaces the directory wholesale: identical
+        // input reproduces identical bytes, so there is nothing to preserve.
+        try? FileManager.default.removeItem(at: uploadDirectory)
+        try? FileManager.default.createDirectory(at: uploadDirectory, withIntermediateDirectories: true)
+        EnrichmentFileProtection.apply(to: directory)
+        EnrichmentFileProtection.apply(to: uploadDirectory)
+
+        var records: [EnrichmentChunkRecord] = []
+        for chunk in planned {
+            records.append(try writeChunk(chunk, in: uploadDirectory))
+        }
+
         let manifest = EnrichmentManifestBuilder.build(
             detail: detail,
-            hashes: hashes,
             route: routeSummary,
             heartRate: heartRateSummary,
-            includeEvents: !detail.events.events.isEmpty,
-            includeActivities: !detail.activities.activities.isEmpty
+            eventsHash: eventsHash,
+            activitiesHash: activitiesHash
         )
         guard let manifestData = try? JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys]) else {
             throw StagingError.serializationFailed
@@ -374,17 +464,10 @@ final class EnrichmentOutbox {
         }
         EnrichmentFileProtection.apply(to: manifestURL)
 
-        var familyHashes: [String: String] = [
-            WorkoutDetailFamily.events.rawValue: hashes.events,
-            WorkoutDetailFamily.activities.rawValue: hashes.activities
-        ]
-        if routeSummary != nil { familyHashes[WorkoutDetailFamily.route.rawValue] = hashes.route }
-        if heartRateSummary != nil { familyHashes[WorkoutDetailFamily.heartRate.rawValue] = hashes.heartRate }
-
         let index = EnrichmentUploadIndex(
             uploadID: uploadID,
             identityKey: identity.identityKey,
-            rootHash: hashes.root,
+            rootHash: rootHash,
             manifestChecksum: WorkoutDetailHashing.sha256Hex(manifestData),
             isManifestAccepted: false,
             isCompleteRequested: false,
@@ -398,7 +481,7 @@ final class EnrichmentOutbox {
             uploadID: uploadID,
             directory: uploadDirectory,
             index: index,
-            rootHash: hashes.root,
+            rootHash: rootHash,
             familyHashes: familyHashes,
             routeAvailability: routeAvailability,
             routePointCount: routePointCount,
@@ -407,22 +490,17 @@ final class EnrichmentOutbox {
         )
     }
 
-    private func writeChunk(
-        body: Data,
-        family: String,
-        chunkIndex: Int,
-        partIndex: Int?,
-        pointCount: Int,
-        fileName: String,
-        in uploadDirectory: URL
-    ) throws -> EnrichmentChunkRecord {
-        // The checksum covers the uncompressed bytes, which is what the server re-derives
-        // after inflating — checksumming the compressed form would not detect a bad
-        // decompression.
-        let checksum = WorkoutDetailHashing.sha256Hex(body)
+    private func writeChunk(_ chunk: PlannedChunk, in uploadDirectory: URL) throws -> EnrichmentChunkRecord {
+        let body = chunk.makeBody()
+        // The family hash already committed to the planned checksum. If re-encoding ever
+        // produced different bytes the upload would be rejected server-side as a hash
+        // mismatch with no way to tell why, so the disagreement is caught here instead.
+        guard WorkoutDetailHashing.sha256Hex(body) == chunk.checksum else {
+            throw StagingError.serializationFailed
+        }
         let compressed = EnrichmentGzip.compress(body)
 
-        let url = uploadDirectory.appendingPathComponent(fileName)
+        let url = uploadDirectory.appendingPathComponent(chunk.fileName)
         do {
             try compressed.write(to: url, options: .atomic)
         } catch {
@@ -431,14 +509,14 @@ final class EnrichmentOutbox {
         EnrichmentFileProtection.apply(to: url)
 
         return EnrichmentChunkRecord(
-            family: family,
-            chunkIndex: chunkIndex,
-            partIndex: partIndex,
-            fileName: fileName,
-            checksum: checksum,
-            uncompressedBytes: body.count,
+            family: chunk.family,
+            chunkIndex: chunk.chunkIndex,
+            partIndex: chunk.partIndex,
+            fileName: chunk.fileName,
+            checksum: chunk.checksum,
+            uncompressedBytes: chunk.uncompressedBytes,
             compressedBytes: compressed.count,
-            pointCount: pointCount,
+            pointCount: chunk.pointCount,
             isUploaded: false
         )
     }
