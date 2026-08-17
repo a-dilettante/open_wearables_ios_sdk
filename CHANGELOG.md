@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 0.15.0
+## 0.15.0
 
 ### Workout-detail enrichment (additive pipeline)
 
