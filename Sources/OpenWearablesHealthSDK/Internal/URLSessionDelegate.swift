@@ -5,6 +5,19 @@ extension OpenWearablesHealthSDK {
     // MARK: - URLSession delegate
     public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let desc = task.taskDescription else { return }
+
+        // Workout-detail enrichment chunks carry an "enrich|" prefix and are handled by
+        // their own state machine. Core upload handling below is unchanged.
+        if desc.hasPrefix("\(EnrichmentUploader.taskPrefix)|") {
+            backgroundDataBuffer.removeValue(forKey: task.taskIdentifier)
+            enrichmentUploader.handleBackgroundChunkCompletion(
+                taskDescription: desc,
+                statusCode: (task.response as? HTTPURLResponse)?.statusCode ?? 0,
+                hadTransportError: error != nil
+            )
+            return
+        }
+
         let parts = desc.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
         let itemPath = parts.count > 0 ? parts[0] : ""
         let payloadPath = parts.count > 1 ? parts[1] : ""

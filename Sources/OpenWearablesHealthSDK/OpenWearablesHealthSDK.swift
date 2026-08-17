@@ -164,6 +164,16 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
     internal var backgroundDataBuffer: [Int: Data] = [:]
     private let bufferLock = NSLock()
 
+    // MARK: - Workout-detail enrichment
+    //
+    // A pipeline beside the core engine (see Internal/WorkoutDetail/). It owns its own
+    // checkpoint, outbox, and discovery anchor; the core round-robin, its budgets, and
+    // its anchors are untouched by it.
+    internal var enrichmentCheckpoint: EnrichmentCheckpointStore!
+    internal var enrichmentOutbox: EnrichmentOutbox!
+    internal var enrichmentUploader: EnrichmentUploader!
+    internal var enrichmentCoordinator: EnrichmentCoordinator!
+
     // MARK: - API Endpoints
     
     internal var apiBaseUrl: String? {
@@ -198,6 +208,20 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
         fgCfg.timeoutIntervalForResource = 600
         fgCfg.waitsForConnectivity = false
         self.foregroundSession = URLSession(configuration: fgCfg, delegate: nil, delegateQueue: OperationQueue.main)
+
+        // Enrichment pipeline. Constructed eagerly so its durable state is available to
+        // the sign-in/sign-out cleanup hooks and to background task completions that can
+        // arrive before any enrichment API is called.
+        self.enrichmentCheckpoint = EnrichmentCheckpointStore(directory: Self.enrichmentStateDirectory())
+        self.enrichmentOutbox = EnrichmentOutbox(directory: Self.enrichmentOutboxDirectory())
+        self.enrichmentUploader = EnrichmentUploader(sdk: self, outbox: enrichmentOutbox)
+        self.enrichmentCoordinator = EnrichmentCoordinator(
+            sdk: self,
+            healthStore: healthStore,
+            outbox: enrichmentOutbox,
+            checkpoint: enrichmentCheckpoint,
+            uploader: enrichmentUploader
+        )
 
         if #available(iOS 13.0, *) {
             BGTaskScheduler.shared.register(forTaskWithIdentifier: refreshTaskId, using: nil) { [weak self] task in
@@ -256,7 +280,14 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
         clearSyncSession()
         resetAllAnchors()
         clearOutbox()
-        
+
+        // The enrichment queue is per-OW-user with no cross-account recovery path, so a
+        // different user starts from an empty one. Signing back in as the same user
+        // keeps unpublished work.
+        if OpenWearablesHealthSdkKeychain.getUserId() != userId {
+            clearEnrichmentState()
+        }
+
         OpenWearablesHealthSdkKeychain.saveCredentials(userId: userId, accessToken: accessToken, refreshToken: refreshToken)
         
         if let apiKey = apiKey {
@@ -281,8 +312,9 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
         resetAllAnchors()
         clearSyncSession()
         clearOutbox()
+        clearEnrichmentState()
         OpenWearablesHealthSdkKeychain.clearAll()
-        
+
         logMessage("Sign out complete - all sync state reset")
     }
     
@@ -1134,6 +1166,9 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
         isSyncing = false
         isInitialSyncInProgress = false
         syncLock.unlock()
+
+        // The core loop is idle again, which is the only time enrichment may run.
+        scheduleEnrichmentPassAfterSync()
     }
     
     /// Returns the remaining background execution time when the app is in the
@@ -1448,8 +1483,12 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
             queue: .main
         ) { [weak self] _ in
             self?.tryResumeAfterForeground()
+            // Foreground reconciliation is how a late route is noticed: no route
+            // observer exists, and workout observers do not fire when only the route
+            // is written.
+            self?.triggerEnrichmentPass(reason: "foreground", debounce: 30)
         }
-        
+
         logMessage("Foreground monitoring started")
     }
     
