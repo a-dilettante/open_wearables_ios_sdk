@@ -446,7 +446,17 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
     public func getSyncStatus() -> [String: Any] {
         return getSyncStatusDict()
     }
-    
+
+    /// Trigger an incremental sync round now.
+    ///
+    /// Restores the 0.13.0 API the RN wrapper bridges; the 0.14.0 rework dropped
+    /// it along with the legacy per-type path. Safe to call while a sync is in
+    /// progress: the engine's re-entry guard skips the round and still calls the
+    /// completion handler.
+    public func syncNow(completion: @escaping () -> Void) {
+        syncAll(fullExport: false, completion: completion)
+    }
+
     /// Resume an interrupted sync session.
     public func resumeSync(completion: @escaping (Bool) -> Void) {
         guard hasResumableSyncSession() else {
