@@ -2,6 +2,8 @@
 
 ## 0.15.0-circle.1 (Circle fork — not released upstream)
 
+* **Restored `syncNow(completion:)`**: the 0.14.0 rework removed it with the legacy per-type path, breaking the RN wrapper's existing bridge. It is back as a thin wrapper over an incremental sync round, safe to call mid-sync.
+
 ### Workout-detail enrichment (additive pipeline)
 
 New opt-in pipeline that publishes workout-owned routes, heart-rate streams, events,
