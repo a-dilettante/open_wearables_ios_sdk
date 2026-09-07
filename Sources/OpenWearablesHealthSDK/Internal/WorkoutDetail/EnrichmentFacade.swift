@@ -47,6 +47,22 @@ extension OpenWearablesHealthSDK {
         logMessage("Workout-detail enrichment \(enabled ? "enabled" : "disabled")")
     }
 
+    /// Enables the first, HR-only owned stream slice. This keeps the public upgrade
+    /// explicit while allowing hosts to ship exact workout attribution before route
+    /// and recorder-event collection is enabled.
+    public func setWorkoutHeartRateEnrichmentEnabled(_ enabled: Bool) {
+        enrichmentCheckpoint.mutate(userKey: userKey()) {
+            $0.isEnabled = enabled
+            $0.heartRateOnly = enabled && !$0.routeSharingEnabled
+            $0.hasRequestedAuthorization = enabled
+        }
+        if !enabled {
+            cancelEnrichmentTransfers()
+            enrichmentOutbox.removeAll()
+        }
+        logMessage("Workout HR enrichment \(enabled ? "enabled" : "disabled")")
+    }
+
     /// Requests HealthKit read access for workout, workout route, and heart rate.
     ///
     /// This deliberately does **not** go through `requestAuthorization(types:completion:)`,
@@ -63,6 +79,31 @@ extension OpenWearablesHealthSDK {
         await enrichmentCoordinator.requestAuthorization()
     }
 
+    /// Explicit route opt-in. A completed permission sheet does not prove read access.
+    /// Revisit recent terminal jobs without resetting the core HealthKit anchors.
+    public func requestWorkoutRouteSharing() async -> Bool {
+        let owner = userKey()
+        guard await enrichmentCoordinator.requestAuthorization(), userKey() == owner else { return false }
+        enrichmentCheckpoint.mutate(userKey: owner) { state in
+            state.routeSharingEnabled = true
+            state.heartRateOnly = false
+            state.isEnabled = true
+            let now = Date()
+            for (key, job) in state.jobs {
+                guard job.state == .published || job.state == .noop,
+                      job.workoutEndDate <= now,
+                      now.timeIntervalSince(job.workoutEndDate) < 7 * 24 * 3600 else { continue }
+                var updated = job
+                updated.state = .pending
+                updated.nextAttemptAt = nil
+                updated.updatedAt = now
+                state.jobs[key] = updated
+            }
+        }
+        startWorkoutDetailEnrichmentPass()
+        return true
+    }
+
     /// Redaction-safe enrichment status: counts, error classes, and progress only.
     ///
     /// Contains no workout identifier, no coordinate, no sample value, and no file name,
@@ -75,6 +116,7 @@ extension OpenWearablesHealthSDK {
 
         return [
             "enabled": state.isEnabled,
+            "routeSharingEnabled": state.routeSharingEnabled,
             "authorizationRequested": state.hasRequestedAuthorization,
             "countsByState": state.jobCountsByState,
             "routePendingCount": state.routePendingCount,

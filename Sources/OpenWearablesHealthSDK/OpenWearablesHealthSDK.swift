@@ -572,11 +572,56 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
             completion(ok)
         }
     }
+
+    /// HealthKit types this SDK can request on the current OS.
+    ///
+    /// This is a capability query only; it never requests authorization or
+    /// changes the persisted tracked set.
+    public var supportedHealthDataTypes: [String] {
+        HealthDataType.allCases
+            .filter { $0.toHKSampleType() != nil }
+            .map(\.rawValue)
+    }
+
+    /// Restores the previously requested tracked set without presenting a
+    /// HealthKit permission sheet. This is intended for foreground recovery.
+    /// Existing anchors and account credentials are untouched. When sync is
+    /// active, observer queries are rebuilt for exactly that persisted set.
+    @discardableResult
+    public func restoreTrackedTypes(types: [String]) -> Bool {
+        let parsedTypes = types.map { HealthDataType(rawValue: $0) }
+        guard parsedTypes.allSatisfy({ $0 != nil }) else {
+            logMessage("Cannot restore unsupported tracked type set")
+            return false
+        }
+        let restored = mapTypes(parsedTypes.compactMap { $0 })
+        guard !restored.isEmpty else {
+            trackedTypes = []
+            return false
+        }
+
+        trackedTypes = restored
+        OpenWearablesHealthSdkKeychain.saveTrackedTypes(types)
+        if OpenWearablesHealthSdkKeychain.isSyncActive() {
+            startBackgroundDelivery()
+        }
+        return true
+    }
     
     /// Request HealthKit read authorization using raw string identifiers.
     @available(*, deprecated, message: "Use requestAuthorization(types: [HealthDataType], completion:) instead")
     public func requestAuthorization(types: [String], completion: @escaping (Bool) -> Void) {
-        let healthTypes = types.compactMap { HealthDataType(rawValue: $0) }
+        let parsedTypes = types.map { HealthDataType(rawValue: $0) }
+        guard parsedTypes.allSatisfy({ $0 != nil }) else {
+            let unsupported = types.enumerated()
+                .filter { parsedTypes[$0.offset] == nil }
+                .map { $0.element }
+                .joined(separator: ", ")
+            logMessage("Unsupported HealthKit data type(s): \(unsupported)")
+            completion(false)
+            return
+        }
+        let healthTypes = parsedTypes.compactMap { $0 }
         requestAuthorization(types: healthTypes, completion: completion)
     }
     
@@ -1009,11 +1054,26 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
     private struct TypeRoundResult {
         let type: HKSampleType
         let samples: [HKSample]
+        let seriesRecords: [[String: Any]]
+        let deletedMetrics: [[String: String]]
         let count: Int
         let nextOlderThan: Date?
         let newAnchor: HKQueryAnchor?
         let anchorData: Data?
         let isDone: Bool
+
+        init(type: HKSampleType, samples: [HKSample], seriesRecords: [[String: Any]] = [], deletedMetrics: [[String: String]] = [], count: Int,
+             nextOlderThan: Date?, newAnchor: HKQueryAnchor?, anchorData: Data?, isDone: Bool) {
+            self.type = type
+            self.samples = samples
+            self.seriesRecords = seriesRecords
+            self.deletedMetrics = deletedMetrics
+            self.count = count
+            self.nextOlderThan = nextOlderThan
+            self.newAnchor = newAnchor
+            self.anchorData = anchorData
+            self.isDone = isDone
+        }
     }
     
     // MARK: - Round-Robin with combined payloads
@@ -1060,7 +1120,7 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
             }
             
             // Mark empty/done types (no data to send) as complete immediately
-            let emptyDone = results.filter { $0.samples.isEmpty && $0.isDone }
+            let emptyDone = results.filter { $0.samples.isEmpty && $0.seriesRecords.isEmpty && $0.deletedMetrics.isEmpty && $0.isDone }
             for result in emptyDone {
                 if !fullExport {
                     self.updateTypeProgress(typeIdentifier: result.type.identifier, sentInChunk: 0, isComplete: true, anchorData: result.anchorData)
@@ -1070,12 +1130,14 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
             }
             
             // Phase 2: Build combined payload from all types that returned data
-            let withData = results.filter { !$0.samples.isEmpty }
+            let withData = results.filter { !$0.samples.isEmpty || !$0.seriesRecords.isEmpty || !$0.deletedMetrics.isEmpty }
             let allSamples = withData.flatMap { $0.samples }
+            let allSeriesRecords = withData.flatMap { $0.seriesRecords }
+            let allDeletedMetrics = withData.flatMap { $0.deletedMetrics }
             
             let doneTypesForAnchorCapture = results.filter { $0.isDone }.map { $0.type }
             
-            if allSamples.isEmpty {
+            if allSamples.isEmpty && allSeriesRecords.isEmpty && allDeletedMetrics.isEmpty {
                 if fullExport && !doneTypesForAnchorCapture.isEmpty {
                     self.captureAnchorsForDoneTypes(types: doneTypesForAnchorCapture, index: 0, rrState: rrState) { captureOk in
                         guard captureOk else { completion(false); return }
@@ -1112,7 +1174,11 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
                 return
             }
             
-            let payload = self.buildCombinedPayload(samples: allSamples)
+            let payload = self.buildCombinedPayload(
+                samples: allSamples,
+                seriesRecords: allSeriesRecords,
+                deletedMetrics: allDeletedMetrics
+            )
             
             self.uploadCombinedPayload(
                 payload: payload, endpoint: endpoint, credential: freshCredential,
@@ -1181,12 +1247,12 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
         if fullExport {
             let cursor = rrState.olderThanCursors[type.identifier]
             fetchOneChunkNewestFirst(type: type, olderThan: cursor, chunkLimit: chunkLimit, generation: rrState.generation) {
-                [weak self] success, samples, nextOlderThan, isDone in
+                [weak self] success, samples, seriesRecords, nextOlderThan, isDone in
                 guard let self = self else { completion(false, accumulated); return }
                 if !success { completion(false, accumulated); return }
                 
                 let result = TypeRoundResult(
-                    type: type, samples: samples, count: samples.count,
+                    type: type, samples: samples, seriesRecords: seriesRecords, count: samples.count,
                     nextOlderThan: nextOlderThan, newAnchor: nil, anchorData: nil, isDone: isDone
                 )
                 self.fetchTypesInRound(
@@ -1198,12 +1264,12 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
         } else {
             let anchor = rrState.anchorCursors[type.identifier]
             fetchOneChunkIncremental(type: type, anchor: anchor, chunkLimit: chunkLimit, generation: rrState.generation) {
-                [weak self] success, samples, newAnchor, anchorData, isDone in
+                [weak self] success, samples, seriesRecords, deletedMetrics, newAnchor, anchorData, isDone in
                 guard let self = self else { completion(false, accumulated); return }
                 if !success { completion(false, accumulated); return }
                 
                 let result = TypeRoundResult(
-                    type: type, samples: samples, count: samples.count,
+                    type: type, samples: samples, seriesRecords: seriesRecords, deletedMetrics: deletedMetrics, count: samples.count,
                     nextOlderThan: nil, newAnchor: newAnchor, anchorData: anchorData, isDone: isDone
                 )
                 self.fetchTypesInRound(
@@ -1254,12 +1320,115 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
     }
     
     // MARK: - Fetch-Only Chunk Processors (no network)
+
+    private static let maxExpandedSeriesEntries = 100_000
+
+    /// Expands condensed quantity parents before upload. The parent remains the
+    /// stable replacement key; children are deterministic and preserve intervals.
+    private func expandQuantitySeries(
+        samples: [HKSample],
+        completion: @escaping (Bool, [[String: Any]]) -> Void
+    ) {
+        let condensed = samples.compactMap { sample -> HKQuantitySample? in
+            guard let quantity = sample as? HKQuantitySample, quantity.count > 1 else { return nil }
+            return quantity
+        }
+        guard !condensed.isEmpty else { completion(true, []); return }
+        var output: [[String: Any]] = []
+        var index = 0
+
+        func next() {
+            guard index < condensed.count else { completion(true, output); return }
+            let sample = condensed[index]
+            index += 1
+            let (unit, unitName) = _defaultUnit(for: sample.quantityType)
+            let parentStart = output.count
+            var childOrdinal = 0
+            let query = HKQuantitySeriesSampleQuery(
+                quantityType: sample.quantityType,
+                predicate: HKQuery.predicateForObject(with: sample.uuid)
+            ) { [weak self] query, quantity, interval, _, done, error in
+                guard let self else { return }
+                if let error {
+                    self.healthStore.stop(query)
+                    completion(false, [])
+                    return
+                }
+                if let quantity, let interval {
+                    if output.count >= Self.maxExpandedSeriesEntries {
+                        self.healthStore.stop(query)
+                        completion(false, [])
+                        return
+                    }
+                    let value = quantity.doubleValue(for: unit)
+                    let canonicalUnit = unitName
+                    let ordinal = childOrdinal
+                    childOrdinal += 1
+                    let childID = "\(sample.uuid.uuidString):\(Int64(interval.start.timeIntervalSince1970 * 1_000_000)):\(ordinal)"
+                    output.append([
+                        "id": childID,
+                        "startDate": OpenWearablesHealthSDK.wireTimestamp(interval.start),
+                        "endDate": OpenWearablesHealthSDK.wireTimestamp(interval.end),
+                        "value": value,
+                        "unit": canonicalUnit,
+                        "parentId": sample.uuid.uuidString,
+                        "ordinal": ordinal
+                    ])
+                }
+                if done {
+                    self.healthStore.stop(query)
+                    var children = Array(output.dropFirst(parentStart)).sorted {
+                        let leftStart = ($0["startDate"] as? String) ?? ""
+                        let rightStart = ($1["startDate"] as? String) ?? ""
+                        if leftStart != rightStart { return leftStart < rightStart }
+                        let leftEnd = ($0["endDate"] as? String) ?? ""
+                        let rightEnd = ($1["endDate"] as? String) ?? ""
+                        if leftEnd != rightEnd { return leftEnd < rightEnd }
+                        return (($0["value"] as? Double) ?? 0) < (($1["value"] as? Double) ?? 0)
+                    }
+                    guard childOrdinal == sample.count, !children.isEmpty else {
+                        completion(false, [])
+                        return
+                    }
+                    for ordinal in children.indices {
+                        guard let oldID = children[ordinal]["id"] as? String,
+                              let separator = oldID.lastIndex(of: ":") else {
+                            completion(false, [])
+                            return
+                        }
+                        let base = String(oldID[..<separator])
+                        children[ordinal]["id"] = "\(base):\(ordinal)"
+                        children[ordinal]["ordinal"] = ordinal
+                    }
+                    let aggregate = sample.quantity.doubleValue(for: unit)
+                    let aggregateUnit = unitName
+                    output.removeSubrange(parentStart..<output.count)
+                    output.append([
+                        "id": sample.uuid.uuidString,
+                        "type": sample.quantityType.identifier,
+                        "startDate": OpenWearablesHealthSDK.wireTimestamp(sample.startDate),
+                        "endDate": OpenWearablesHealthSDK.wireTimestamp(sample.endDate),
+                        "zoneOffset": self._zoneOffsetString(metadata: sample.metadata, date: sample.startDate),
+                        "source": self._mapSource(sample.sourceRevision, device: sample.device),
+                        "value": aggregate,
+                        "unit": aggregateUnit,
+                        "parentId": NSNull(),
+                        "seriesSamples": children,
+                        "metadata": self._metadataDict(sample.metadata)
+                    ])
+                    next()
+                }
+            }
+            healthStore.execute(query)
+        }
+        next()
+    }
     
     private func fetchOneChunkNewestFirst(
         type: HKSampleType, olderThan: Date?, chunkLimit: Int, generation: Int,
-        completion: @escaping (_ success: Bool, _ samples: [HKSample], _ nextOlderThan: Date?, _ isDone: Bool) -> Void
+        completion: @escaping (_ success: Bool, _ samples: [HKSample], _ seriesRecords: [[String: Any]], _ nextOlderThan: Date?, _ isDone: Bool) -> Void
     ) {
-        if isSyncCancelled(generation: generation) { completion(false, [], nil, false); return }
+        if isSyncCancelled(generation: generation) { completion(false, [], [], nil, false); return }
         
         let startDate = syncStartDate()
         var predicate: NSPredicate? = nil
@@ -1274,33 +1443,35 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
         let query = HKSampleQuery(sampleType: type, predicate: predicate, limit: chunkLimit, sortDescriptors: [sortDescriptor]) {
             [weak self] _, samplesOrNil, error in
             autoreleasepool {
-                guard let self = self else { completion(false, [], nil, false); return }
+                guard let self = self else { completion(false, [], [], nil, false); return }
                 
-                if self.isSyncCancelled(generation: generation) { completion(false, [], nil, false); return }
+                if self.isSyncCancelled(generation: generation) { completion(false, [], [], nil, false); return }
                 
                 if let error = error {
                     if self.isProtectedDataError(error) {
                         self.logMessage("\(self.shortTypeName(type.identifier)): protected data inaccessible - pausing sync")
                         self.pendingSyncAfterUnlock = true
-                        completion(false, [], nil, false)
+                        completion(false, [], [], nil, false)
                         return
                     }
-                    self.logMessage("\(self.shortTypeName(type.identifier)): \(error.localizedDescription) - skipping")
-                    completion(true, [], nil, true)
+                    self.logMessage("\(self.shortTypeName(type.identifier)): \(error.localizedDescription) - pausing without advancing cursor")
+                    completion(false, [], [], nil, false)
                     return
                 }
                 
                 let samples = samplesOrNil ?? []
                 if samples.isEmpty {
                     self.logMessage("  \(self.shortTypeName(type.identifier)): all data sent (newest first)")
-                    completion(true, [], nil, true)
+                    completion(true, [], [], nil, true)
                     return
                 }
                 
                 let isLastChunk = samples.count < chunkLimit
                 let nextOlderThan = isLastChunk ? nil : samples.last!.endDate
                 self.logMessage("  \(self.shortTypeName(type.identifier)): \(samples.count) samples (newest first)")
-                completion(true, samples, nextOlderThan, isLastChunk)
+                self.expandQuantitySeries(samples: samples) { ok, records in
+                    completion(ok, samples, records, nextOlderThan, ok && isLastChunk)
+                }
             }
         }
         
@@ -1309,9 +1480,9 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
     
     private func fetchOneChunkIncremental(
         type: HKSampleType, anchor: HKQueryAnchor?, chunkLimit: Int, generation: Int,
-        completion: @escaping (_ success: Bool, _ samples: [HKSample], _ newAnchor: HKQueryAnchor?, _ anchorData: Data?, _ isDone: Bool) -> Void
+        completion: @escaping (_ success: Bool, _ samples: [HKSample], _ seriesRecords: [[String: Any]], _ deletedMetrics: [[String: String]], _ newAnchor: HKQueryAnchor?, _ anchorData: Data?, _ isDone: Bool) -> Void
     ) {
-        if isSyncCancelled(generation: generation) { completion(false, [], nil, nil, false); return }
+        if isSyncCancelled(generation: generation) { completion(false, [], [], [], nil, nil, false); return }
         
         let syncPredicate: NSPredicate? = {
             guard let start = syncStartDate() else { return nil }
@@ -1321,24 +1492,25 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
         let query = HKAnchoredObjectQuery(type: type, predicate: syncPredicate, anchor: anchor, limit: chunkLimit) {
             [weak self] _, samplesOrNil, deletedObjects, newAnchor, error in
             autoreleasepool {
-                guard let self = self else { completion(false, [], nil, nil, false); return }
+                guard let self = self else { completion(false, [], [], [], nil, nil, false); return }
                 
-                if self.isSyncCancelled(generation: generation) { completion(false, [], nil, nil, false); return }
+                if self.isSyncCancelled(generation: generation) { completion(false, [], [], [], nil, nil, false); return }
                 
                 if let error = error {
                     if self.isProtectedDataError(error) {
                         self.logMessage("\(self.shortTypeName(type.identifier)): protected data inaccessible - pausing sync")
                         self.pendingSyncAfterUnlock = true
-                        completion(false, [], nil, nil, false)
+                        completion(false, [], [], [], nil, nil, false)
                         return
                     }
-                    self.logMessage("\(self.shortTypeName(type.identifier)): \(error.localizedDescription) - skipping")
-                    completion(true, [], nil, nil, true)
+                    self.logMessage("\(self.shortTypeName(type.identifier)): \(error.localizedDescription) - pausing without advancing anchor")
+                    completion(false, [], [], [], nil, nil, false)
                     return
                 }
                 
                 let samples = samplesOrNil ?? []
                 let deletedCount = deletedObjects?.count ?? 0
+                let deletedMetrics = deletedObjects?.map { ["id": $0.uuid.uuidString, "type": type.identifier] } ?? []
                 
                 var anchorData: Data? = nil
                 if let newAnchor = newAnchor {
@@ -1347,7 +1519,7 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
                 
                 if samples.isEmpty && deletedCount == 0 {
                     self.logMessage("  \(self.shortTypeName(type.identifier)): complete")
-                    completion(true, [], newAnchor, anchorData, true)
+                    completion(true, [], [], deletedMetrics, newAnchor, anchorData, true)
                     return
                 }
                 
@@ -1356,7 +1528,9 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
                 // for the remaining (unfetched) data was never advanced.
                 let isLastChunk = (samples.count + deletedCount) < chunkLimit
                 self.logMessage("  \(self.shortTypeName(type.identifier)): \(samples.count) samples" + (deletedCount > 0 ? ", \(deletedCount) deleted" : ""))
-                completion(true, samples, newAnchor, anchorData, isLastChunk)
+                self.expandQuantitySeries(samples: samples) { ok, records in
+                    completion(ok, samples, records, deletedMetrics, newAnchor, ok ? anchorData : nil, ok && isLastChunk)
+                }
             }
         }
         

@@ -7,6 +7,22 @@ import XCTest
 /// Nothing here touches HealthKit or the network.
 final class EnrichmentContractTests: XCTestCase {
 
+    func testUnicodeAndSlashProvenanceHashMatchesOWVector() {
+        let provenance: [String: Any] = [
+            "association": "exact_workout",
+            "source_name": "Sensor’s HR/β",
+            "device_model": NSNull()
+        ]
+        let hash = EnrichmentContentHash.streamFamily(
+            metric: "heart_rate",
+            sourceKey: "sensor",
+            pointCount: 2,
+            chunkChecksums: [String(repeating: "a", count: 64)],
+            provenance: provenance
+        )
+        XCTAssertEqual(hash, "dc5df6927efe58bc32e2dac62d25363136162c5ce0fec453466b0813fb67bbf9")
+    }
+
     // MARK: - Upload id
 
     /// Pinned test vector. Both sides derive the upload id from this exact formula, so a
@@ -166,7 +182,7 @@ final class EnrichmentContractTests: XCTestCase {
         let heartRate = try XCTUnwrap(families["heart_rate"] as? [String: Any])
         XCTAssertEqual(Set(heartRate.keys), [
             "content_hash", "chunk_count", "point_count", "uncompressed_bytes", "availability",
-            "source_key", "unit", "axis", "source_type_identifier", "coverage", "gaps"
+            "source_key", "unit", "axis", "source_type_identifier", "provenance", "coverage", "gaps"
         ])
         XCTAssertEqual(heartRate["unit"] as? String, "count/min")
         XCTAssertEqual(heartRate["axis"] as? String, "interval")
@@ -242,15 +258,15 @@ final class EnrichmentContractTests: XCTestCase {
     // MARK: - Preparation
 
     /// The fixture mixes a watch and a chest strap. The contract pins one source per
-    /// stream, so the dominant one is sent and the family is honestly `partial` — the
-    /// alternative, merging them, would invent a single sensor that never existed.
-    func testMultipleHeartRateSourcesKeepDominantAndReportPartial() {
+    /// stream, so the complete selected source remains available and the dropped
+    /// foreign count is retained separately.
+    func testMultipleHeartRateSourcesKeepDominantAndReportCompleteSelectedSource() {
         let result = EnrichmentPreparation.prepare(WorkoutDetailTestFixtures.detail())
 
         XCTAssertEqual(result.droppedForeignSourceEntryCount, 1)
         XCTAssertEqual(Set(result.detail.heartRate.entries.map { $0.sourceKey }).count, 1)
         XCTAssertEqual(result.detail.heartRate.entries[0].sourceKey, WorkoutDetailTestFixtures.sourceKey)
-        XCTAssertEqual(result.detail.heartRate.availability, .partial)
+        XCTAssertEqual(result.detail.heartRate.availability, .available)
     }
 
     /// A native type the contract cannot express is dropped, never flattened into a

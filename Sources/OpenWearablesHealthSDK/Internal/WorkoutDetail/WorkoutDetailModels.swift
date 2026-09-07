@@ -225,6 +225,12 @@ public struct QuantityEntry: Equatable, Sendable {
     public var sampleUUID: String?
     /// Stable per-source key so watch/strap/phone samples are never silently merged.
     public var sourceKey: String
+    public var sourceBundleIdentifier: String?
+    public var sourceName: String?
+    public var sourceVersion: String?
+    public var deviceManufacturer: String?
+    public var deviceModel: String?
+    public var deviceProductType: String?
     public var kind: QuantityEntryKind
     /// True when this entry came out of `HKQuantitySeriesSampleQuery` rather than
     /// from the top-level sample itself.
@@ -243,6 +249,12 @@ public struct QuantityEntry: Equatable, Sendable {
         unit: String,
         sampleUUID: String? = nil,
         sourceKey: String,
+        sourceBundleIdentifier: String? = nil,
+        sourceName: String? = nil,
+        sourceVersion: String? = nil,
+        deviceManufacturer: String? = nil,
+        deviceModel: String? = nil,
+        deviceProductType: String? = nil,
         kind: QuantityEntryKind,
         isExpandedFromSeries: Bool = false,
         parentSeriesCount: Int = 1,
@@ -256,6 +268,12 @@ public struct QuantityEntry: Equatable, Sendable {
         self.unit = unit
         self.sampleUUID = sampleUUID
         self.sourceKey = sourceKey
+        self.sourceBundleIdentifier = sourceBundleIdentifier
+        self.sourceName = sourceName
+        self.sourceVersion = sourceVersion
+        self.deviceManufacturer = deviceManufacturer
+        self.deviceModel = deviceModel
+        self.deviceProductType = deviceProductType
         self.kind = kind
         self.isExpandedFromSeries = isExpandedFromSeries
         self.parentSeriesCount = parentSeriesCount

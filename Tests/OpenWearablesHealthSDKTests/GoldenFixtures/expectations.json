@@ -34,7 +34,7 @@
   "family_hashes" : {
     "activities" : "079a54c0db4bba9ebc5a284588091c1367e195d9ae530141c1f9ddd5f9c5f726",
     "events" : "b37f6e12250064b612a287f98b49e88017d4da43651edd652e23d9b0eef5f128",
-    "heart_rate" : "84c01bf57e12b977d7e3608907ad9e28005151f03c8e31c868d6bc95493eae1b",
+    "heart_rate" : "bb82ad9073ba535eb77aa5033ca16134e5a6491a0e7aa44096df9b0415b9a8b4",
     "route" : "77916fc1c09fe86da5d998df8c9e1f3412d125acb50e6c822a63751dfb9f50b2"
   },
   "heart_rate" : {
@@ -43,8 +43,8 @@
     "point_count" : 600
   },
   "identity_key" : "apple|com.example.goldenrecorder|golden-sync-0001",
-  "manifest_sha256" : "62b0f26a4bc14659208e5e043fedd24c3d905ef68adf83c9c3733207cbfed17d",
-  "root_hash" : "d88d0d344532a72a32d684156a03b1914d0a05fb148e173c2fb2538f13820692",
+  "manifest_sha256" : "306c97d98f95bb0c104162f6c2d2f16088b4325f6dbd5de4343eb15895e65101",
+  "root_hash" : "e955e0d1379e0b15ff91ae683c4fc37c5f19343871b7bafd199be7e17d2d3835",
   "route" : {
     "chunk_count" : 2,
     "parts" : [
@@ -62,5 +62,5 @@
     "point_count" : 1280
   },
   "schema_version" : 1,
-  "upload_id" : "7f87e3238475fd01e03d05eeeba3a34b"
+  "upload_id" : "39b02c0c452d8b5076cce433d136715b"
 }

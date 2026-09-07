@@ -71,6 +71,9 @@ public enum HealthDataType: String, CaseIterable, Sendable {
     case runningPower
     case runningVerticalOscillation
     case runningGroundContactTime
+    // Circle fork: speed and stride length complete the running-dynamics set.
+    case runningSpeed
+    case runningStrideLength
 
     // Cycling (iOS 17.0+) — Bluetooth power meters and Apple Watch cycling workouts
     case cyclingPower
@@ -194,6 +197,16 @@ public enum HealthDataType: String, CaseIterable, Sendable {
                 return HKObjectType.quantityType(forIdentifier: .runningGroundContactTime)
             }
             return nil
+        case .runningSpeed:
+            if #available(iOS 16.0, *) {
+                return HKObjectType.quantityType(forIdentifier: .runningSpeed)
+            }
+            return nil
+        case .runningStrideLength:
+            if #available(iOS 16.0, *) {
+                return HKObjectType.quantityType(forIdentifier: .runningStrideLength)
+            }
+            return nil
         case .cyclingPower:
             if #available(iOS 17.0, *) {
                 return HKObjectType.quantityType(forIdentifier: .cyclingPower)
@@ -231,6 +244,42 @@ public enum HealthDataType: String, CaseIterable, Sendable {
 }
 
 extension OpenWearablesHealthSDK {
+
+    /// Microsecond-precision UTC wire timestamp (Circle fork).
+    internal static func wireTimestamp(_ date: Date) -> String {
+        let micros = Int64((date.timeIntervalSince1970 * 1_000_000).rounded())
+        let seconds = micros >= 0 ? micros / 1_000_000 : (micros - 999_999) / 1_000_000
+        let remainder = abs(micros - seconds * 1_000_000)
+        let whole = Date(timeIntervalSince1970: TimeInterval(seconds))
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        return "\(formatter.string(from: whole)).\(String(format: "%06lld", remainder))Z"
+    }
+
+    /// Builds the combined payload and atomically replaces any condensed parents
+    /// with the supplied parent/series envelopes.
+    internal func buildCombinedPayload(samples: [HKSample], seriesRecords: [[String: Any]]) -> [String: Any] {
+        var payload = buildCombinedPayload(samples: samples)
+        guard !seriesRecords.isEmpty,
+              var data = payload["data"] as? [String: Any],
+              var records = data["records"] as? [[String: Any]] else { return payload }
+        let parentIDs = Set(seriesRecords.compactMap { $0["id"] as? String })
+        records.removeAll { parentIDs.contains($0["id"] as? String ?? "") }
+        records.append(contentsOf: seriesRecords)
+        data["records"] = records
+        payload["data"] = data
+        return payload
+    }
+
+    internal func buildCombinedPayload(samples: [HKSample], seriesRecords: [[String: Any]], deletedMetrics: [[String: String]]) -> [String: Any] {
+        var payload = buildCombinedPayload(samples: samples, seriesRecords: seriesRecords)
+        guard var data = payload["data"] as? [String: Any] else { return payload }
+        if !deletedMetrics.isEmpty { data["deletedMetrics"] = deletedMetrics }
+        payload["data"] = data
+        return payload
+    }
 
     // MARK: - Combined payload
 
@@ -349,6 +398,12 @@ extension OpenWearablesHealthSDK {
                 if qt == HKObjectType.quantityType(forIdentifier: .runningGroundContactTime) {
                     return .secondUnit(with: .milli)
                 }
+                if qt == HKObjectType.quantityType(forIdentifier: .runningSpeed) {
+                    return .meter().unitDivided(by: .second())
+                }
+                if qt == HKObjectType.quantityType(forIdentifier: .runningStrideLength) {
+                    return .meterUnit(with: .centi)
+                }
             }
             if #available(iOS 17.0, *) {
                 if qt == HKObjectType.quantityType(forIdentifier: .cyclingPower)
@@ -372,7 +427,7 @@ extension OpenWearablesHealthSDK {
         }
     }
 
-    private func _defaultUnit(for qt: HKQuantityType) -> (HKUnit, String) {
+    internal func _defaultUnit(for qt: HKQuantityType) -> (HKUnit, String) {
         switch qt {
         case HKObjectType.quantityType(forIdentifier: .stepCount):
             return (.count(), "count")
@@ -447,6 +502,12 @@ extension OpenWearablesHealthSDK {
                 }
                 if qt == HKObjectType.quantityType(forIdentifier: .runningGroundContactTime) {
                     return (.secondUnit(with: .milli), "ms")
+                }
+                if qt == HKObjectType.quantityType(forIdentifier: .runningSpeed) {
+                    return (.meter().unitDivided(by: .second()), "m/s")
+                }
+                if qt == HKObjectType.quantityType(forIdentifier: .runningStrideLength) {
+                    return (.meterUnit(with: .centi), "cm")
                 }
             }
             if #available(iOS 17.0, *) {
@@ -586,8 +647,8 @@ extension OpenWearablesHealthSDK {
         return [
             "id": q.uuid.uuidString,
             "type": q.quantityType.identifier,
-            "startDate": dateFormatter.string(from: q.startDate),
-            "endDate": dateFormatter.string(from: q.endDate),
+            "startDate": OpenWearablesHealthSDK.wireTimestamp(q.startDate),
+            "endDate": OpenWearablesHealthSDK.wireTimestamp(q.endDate),
             "zoneOffset": _zoneOffsetString(metadata: q.metadata, date: q.startDate),
             "source": _mapSource(q.sourceRevision, device: q.device),
             "value": value,
@@ -821,7 +882,7 @@ extension OpenWearablesHealthSDK {
     
     // MARK: - Source mapper (unified format)
     
-    private func _mapSource(_ sourceRevision: HKSourceRevision, device: HKDevice?) -> [String: Any] {
+    internal func _mapSource(_ sourceRevision: HKSourceRevision, device: HKDevice?) -> [String: Any] {
         var result: [String: Any] = [
             "appId": sourceRevision.source.bundleIdentifier,
             "name": sourceRevision.source.name,
@@ -861,7 +922,7 @@ extension OpenWearablesHealthSDK {
     
     // MARK: - Metadata (unified: dict or null)
     
-    private func _metadataDict(_ meta: [String: Any]?) -> Any {
+    internal func _metadataDict(_ meta: [String: Any]?) -> Any {
         guard let meta = meta, !meta.isEmpty else { return NSNull() }
         var result: [String: Any] = [:]
         for (k, v) in meta {
@@ -872,7 +933,7 @@ extension OpenWearablesHealthSDK {
     
     // MARK: - Zone Offset
     
-    private func _zoneOffsetString(metadata: [String: Any]?, fallback: [String: Any]? = nil, date: Date) -> Any {
+    internal func _zoneOffsetString(metadata: [String: Any]?, fallback: [String: Any]? = nil, date: Date) -> Any {
         if let tzName = metadata?[HKMetadataKeyTimeZone] as? String,
            let tz = TimeZone(identifier: tzName) {
             return _formatZoneOffset(tz.secondsFromGMT(for: date))

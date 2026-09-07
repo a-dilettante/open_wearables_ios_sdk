@@ -24,9 +24,10 @@ final class EnrichmentGoldenFixtureTests: XCTestCase {
     /// bundle: the bundle holds a build-time copy, and regenerating has to update the copy
     /// that is under version control.
     private static var fixtureDirectory: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .appendingPathComponent("GoldenFixtures", isDirectory: true)
+        if let output = ProcessInfo.processInfo.environment["OW_GOLDEN_OUTPUT_DIR"] {
+            return URL(fileURLWithPath: output, isDirectory: true)
+        }
+        return Bundle.module.resourceURL!.appendingPathComponent("GoldenFixtures", isDirectory: true)
     }
 
     private var isRegenerating: Bool {
@@ -90,7 +91,9 @@ final class EnrichmentGoldenFixtureTests: XCTestCase {
     func testGoldenFixtureMatchesTheCommittedBytes() throws {
         let fixture = try stageGolden(into: outboxDirectory)
 
-        try FileManager.default.createDirectory(at: Self.fixtureDirectory, withIntermediateDirectories: true)
+        if isRegenerating {
+            try FileManager.default.createDirectory(at: Self.fixtureDirectory, withIntermediateDirectories: true)
+        }
         try pin(fixture.manifest, as: "manifest.json")
         for (record, bytes) in fixture.chunks {
             try pin(bytes, as: record.fileName)
@@ -174,6 +177,7 @@ final class EnrichmentGoldenFixtureTests: XCTestCase {
                     .filter { $0.family == "heart_rate" }
                     .sorted { $0.chunkIndex < $1.chunkIndex }
                     .map { $0.checksum }
+                ,provenance: heartRate["provenance"] as? [String: Any]
             )
         )
 
@@ -300,18 +304,25 @@ final class EnrichmentGoldenFixtureTests: XCTestCase {
     private func pin(_ data: Data, as name: String, file: StaticString = #filePath, line: UInt = #line) throws {
         let url = Self.fixtureDirectory.appendingPathComponent(name)
 
-        if !isRegenerating, let committed = try? Data(contentsOf: url), committed != data {
-            XCTFail(
-                """
-                Golden fixture \(name) no longer matches what the pipeline produces. If the wire \
-                contract or a hash recipe changed on purpose, regenerate with \(Self.regenerateKey)=1 \
-                and copy the new bytes to the open-wearables backend at \
-                backend/tests/fixtures/workout_owned_detail_golden/. If it did not change on purpose, \
-                this is the drift the fixture exists to catch.
-                """,
-                file: file,
-                line: line
-            )
+        if !isRegenerating {
+            guard let committed = try? Data(contentsOf: url) else {
+                XCTFail("Missing golden fixture \(name)", file: file, line: line)
+                return
+            }
+            guard committed == data else {
+                XCTFail(
+                    """
+                    Golden fixture \(name) no longer matches what the pipeline produces. If the wire \
+                    contract or a hash recipe changed on purpose, regenerate with \(Self.regenerateKey)=1 \
+                    and copy the new bytes to the open-wearables backend at \
+                    backend/tests/fixtures/workout_owned_detail_golden/. If it did not change on purpose, \
+                    this is the drift the fixture exists to catch.
+                    """,
+                    file: file,
+                    line: line
+                )
+                return
+            }
             return
         }
 

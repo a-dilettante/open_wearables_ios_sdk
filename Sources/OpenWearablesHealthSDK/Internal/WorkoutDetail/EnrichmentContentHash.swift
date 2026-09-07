@@ -43,15 +43,22 @@ enum EnrichmentContentHash {
         metric: String,
         sourceKey: String,
         pointCount: Int,
-        chunkChecksums: [String]
+        chunkChecksums: [String],
+        provenance: [String: Any]? = nil
     ) -> String {
-        digest([
+        var parts = [
             "\(prefix):stream",
             metric,
             sourceKey,
             String(pointCount),
             chunkChecksums.joined(separator: ":")
-        ])
+        ]
+        if let provenance,
+           let data = try? JSONSerialization.data(withJSONObject: provenance, options: [.sortedKeys, .withoutEscapingSlashes]),
+           let canonical = String(data: data, encoding: .utf8) {
+            parts.append(canonical)
+        }
+        return digest(parts)
     }
 
     /// Identity of one `HKWorkoutRoute` object, over the chunks that carry it.

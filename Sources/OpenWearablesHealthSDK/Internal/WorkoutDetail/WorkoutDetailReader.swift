@@ -154,6 +154,18 @@ public final class WorkoutDetailReader: @unchecked Sendable {
         )
     }
 
+    /// Minimal owned-HR mode. It performs only the exact workout-owned heart-rate
+    /// query and never asks HealthKit for route, event, or activity data.
+    public func collectHeartRateOnly(for workout: HKWorkout) async -> CollectedWorkoutDetail {
+        CollectedWorkoutDetail(
+            identity: makeIdentity(workout),
+            route: WorkoutRouteDetail(availability: .notAvailableOrNotAuthorized),
+            heartRate: await collectHeartRate(for: workout),
+            events: WorkoutEventsDetail(availability: .notAvailableOrNotAuthorized),
+            activities: WorkoutActivitiesDetail(availability: .notAvailableOrNotAuthorized, isSupportedOnThisOS: false)
+        )
+    }
+
     // MARK: Identity
 
     func makeIdentity(_ workout: HKWorkout) -> WorkoutIdentity {
@@ -346,6 +358,12 @@ public final class WorkoutDetailReader: @unchecked Sendable {
                 productType: sample.sourceRevision.productType,
                 deviceModel: sample.device?.model
             )
+            let sourceBundleIdentifier = sample.sourceRevision.source.bundleIdentifier
+            let sourceName = sample.sourceRevision.source.name
+            let sourceVersion = sample.sourceRevision.version
+            let deviceManufacturer = sample.device?.manufacturer
+            let deviceModel = sample.device?.model
+            let deviceProductType = sample.sourceRevision.productType
 
             // `count > 1` means HealthKit condensed this into a quantity series.
             if sample.count > 1 {
@@ -356,6 +374,12 @@ public final class WorkoutDetailReader: @unchecked Sendable {
                         unit: bpm,
                         unitString: unitString,
                         sourceKey: sourceKey,
+                        sourceBundleIdentifier: sourceBundleIdentifier,
+                        sourceName: sourceName,
+                        sourceVersion: sourceVersion,
+                        deviceManufacturer: deviceManufacturer,
+                        deviceModel: deviceModel,
+                        deviceProductType: deviceProductType,
                         workoutStart: workout.startDate,
                         startingOrdinal: ordinal
                     )
@@ -378,6 +402,12 @@ public final class WorkoutDetailReader: @unchecked Sendable {
                 unit: unitString,
                 sampleUUID: sample.uuid.uuidString,
                 sourceKey: sourceKey,
+                sourceBundleIdentifier: sourceBundleIdentifier,
+                sourceName: sourceName,
+                sourceVersion: sourceVersion,
+                deviceManufacturer: deviceManufacturer,
+                deviceModel: deviceModel,
+                deviceProductType: deviceProductType,
                 kind: WorkoutDetailMapping.entryKind(start: sample.startDate, end: sample.endDate),
                 isExpandedFromSeries: false,
                 parentSeriesCount: sample.count,
@@ -410,6 +440,12 @@ public final class WorkoutDetailReader: @unchecked Sendable {
         unit: HKUnit,
         unitString: String,
         sourceKey: String,
+        sourceBundleIdentifier: String?,
+        sourceName: String?,
+        sourceVersion: String?,
+        deviceManufacturer: String?,
+        deviceModel: String?,
+        deviceProductType: String?,
         workoutStart: Date,
         startingOrdinal: Int
     ) async throws -> [QuantityEntry] {
@@ -441,6 +477,12 @@ public final class WorkoutDetailReader: @unchecked Sendable {
                         unit: unitString,
                         sampleUUID: sample.uuid.uuidString,
                         sourceKey: sourceKey,
+                        sourceBundleIdentifier: sourceBundleIdentifier,
+                        sourceName: sourceName,
+                        sourceVersion: sourceVersion,
+                        deviceManufacturer: deviceManufacturer,
+                        deviceModel: deviceModel,
+                        deviceProductType: deviceProductType,
                         kind: WorkoutDetailMapping.entryKind(start: dateInterval.start, end: dateInterval.end),
                         isExpandedFromSeries: true,
                         parentSeriesCount: sample.count,

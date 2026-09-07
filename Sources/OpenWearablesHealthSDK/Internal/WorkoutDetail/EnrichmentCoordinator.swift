@@ -269,6 +269,18 @@ final class EnrichmentCoordinator {
         let now = Date()
         checkpoint.mutate(userKey: sdk.userKey()) { state in
             for (key, job) in state.jobs {
+                if state.heartRateOnly {
+                    guard (job.state == .published || job.state == .noop),
+                          now.timeIntervalSince(job.workoutEndDate) >= 0,
+                          now.timeIntervalSince(job.workoutEndDate) < Self.reconciliationWindow else { continue }
+                    if now.timeIntervalSince(job.updatedAt) > 900 {
+                        var updated = job
+                        updated.state = .pending
+                        updated.updatedAt = now
+                        state.jobs[key] = updated
+                    }
+                    continue
+                }
                 guard job.state == .published || job.state == .noop,
                       let availability = job.routeAvailabilityAtLastPublish,
                       availability == WorkoutDetailAvailability.pendingEnrichment.rawValue
@@ -355,12 +367,17 @@ final class EnrichmentCoordinator {
             return nil
         }
 
-        let collected = await reader.collectDetail(for: workout)
+        let heartRateOnly = checkpoint.load(userKey: userKey).heartRateOnly
+        let collected = heartRateOnly
+            ? await reader.collectHeartRateOnly(for: workout)
+            : await reader.collectDetail(for: workout)
         let prepared = EnrichmentPreparation.prepare(collected)
-        let routeAvailability = EnrichmentPreparation.routeAvailability(
-            prepared.detail.route,
-            workoutEnd: prepared.detail.identity.endDate
-        )
+        let routeAvailability = heartRateOnly
+            ? WorkoutDetailAvailability.notAvailableOrNotAuthorized
+            : EnrichmentPreparation.routeAvailability(
+                prepared.detail.route,
+                workoutEnd: prepared.detail.identity.endDate
+            )
 
         // Nothing to publish and nothing pending: an indoor workout from a summary-only
         // source. Recording it as noop stops it being re-read every pass.

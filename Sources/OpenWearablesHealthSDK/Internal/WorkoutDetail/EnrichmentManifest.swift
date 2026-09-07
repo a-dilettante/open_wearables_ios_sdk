@@ -228,7 +228,9 @@ enum EnrichmentPreparation {
                 let kept = entries.filter { $0.sourceKey == dominant }
                 droppedEntries = entries.count - kept.count
                 prepared.heartRate.entries = kept
-                prepared.heartRate.availability = kept.isEmpty ? .notAvailableOrNotAuthorized : .partial
+                // Dropping a separate sensor does not make the selected sensor
+                // incomplete. Preserve the selected query's completeness state.
+                prepared.heartRate.availability = kept.isEmpty ? .notAvailableOrNotAuthorized : detail.heartRate.availability
             }
         }
 
@@ -357,6 +359,7 @@ struct EnrichmentStreamSummary {
     /// Spans the source declared as paused, from its own pause/resume events. Never a
     /// threshold guess about "too long between samples".
     var gaps: [(startElapsedMicroseconds: Int, endElapsedMicroseconds: Int)]
+    var provenance: [String: Any] = [:]
 
     var manifestObject: [String: Any] {
         var object: [String: Any] = [
@@ -369,6 +372,7 @@ struct EnrichmentStreamSummary {
             "unit": unit,
             "axis": axis,
             "source_type_identifier": sourceTypeIdentifier,
+            "provenance": provenance,
             "gaps": gaps.map { ["start_elapsed_us": $0.startElapsedMicroseconds, "end_elapsed_us": $0.endElapsedMicroseconds] }
         ]
         if let coverage {

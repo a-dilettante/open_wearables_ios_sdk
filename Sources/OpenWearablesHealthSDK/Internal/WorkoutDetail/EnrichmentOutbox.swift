@@ -382,6 +382,16 @@ final class EnrichmentOutbox {
             heartRateChunkIndex += 1
         }
 
+        let streamProvenance: [String: Any] = entries.first.map { first in [
+            "association": "exact_workout",
+            "source_bundle_id": first.sourceBundleIdentifier as Any? ?? NSNull(),
+            "source_name": first.sourceName as Any? ?? NSNull(),
+            "source_version": first.sourceVersion as Any? ?? NSNull(),
+            "device_manufacturer": first.deviceManufacturer as Any? ?? NSNull(),
+            "device_model": first.deviceModel as Any? ?? NSNull(),
+            "device_product_type": first.deviceProductType as Any? ?? NSNull(),
+            "healthkit_workout_uuid": detail.identity.workoutUUID as Any? ?? NSNull()
+        ] } ?? [:]
         let heartRateSummary: EnrichmentStreamSummary? = entries.isEmpty ? nil : EnrichmentStreamSummary(
             contentHash: EnrichmentContentHash.streamFamily(
                 metric: metric,
@@ -390,7 +400,8 @@ final class EnrichmentOutbox {
                 // one than the entries carry is a rejection rather than a silent merge.
                 sourceKey: entries[0].sourceKey,
                 pointCount: entries.count,
-                chunkChecksums: heartRateChecksums
+                chunkChecksums: heartRateChecksums,
+                provenance: streamProvenance
             ),
             chunkCount: heartRateChunkIndex,
             pointCount: entries.count,
@@ -407,7 +418,8 @@ final class EnrichmentOutbox {
             gaps: EnrichmentManifestBuilder.declaredGaps(
                 events: detail.events.events,
                 throughElapsedOffset: entries[entries.count - 1].endElapsedOffset
-            )
+            ),
+            provenance: streamProvenance
         )
 
         // --- Plan: inline families -------------------------------------------

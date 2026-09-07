@@ -126,6 +126,8 @@ struct EnrichmentCheckpointState: Codable, Equatable {
     var version: Int
     var userKey: String
     var isEnabled: Bool
+    var heartRateOnly: Bool
+    var routeSharingEnabled: Bool
     var hasRequestedAuthorization: Bool
     /// Base64 `HKQueryAnchor` for workout discovery, owned by enrichment alone.
     ///
@@ -142,10 +144,32 @@ struct EnrichmentCheckpointState: Codable, Equatable {
         self.version = Self.currentVersion
         self.userKey = userKey
         self.isEnabled = false
+        self.heartRateOnly = false
+        self.routeSharingEnabled = false
         self.hasRequestedAuthorization = false
         self.jobs = [:]
         self.tombstones = [:]
         self.updatedAt = now
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, userKey, isEnabled, heartRateOnly, routeSharingEnabled, hasRequestedAuthorization,
+             discoveryAnchor, jobs, tombstones, historicalCursor, updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decode(Int.self, forKey: .version)
+        userKey = try c.decode(String.self, forKey: .userKey)
+        isEnabled = try c.decode(Bool.self, forKey: .isEnabled)
+        heartRateOnly = try c.decodeIfPresent(Bool.self, forKey: .heartRateOnly) ?? false
+        routeSharingEnabled = try c.decodeIfPresent(Bool.self, forKey: .routeSharingEnabled) ?? false
+        hasRequestedAuthorization = try c.decode(Bool.self, forKey: .hasRequestedAuthorization)
+        discoveryAnchor = try c.decodeIfPresent(String.self, forKey: .discoveryAnchor)
+        jobs = try c.decode([String: EnrichmentJob].self, forKey: .jobs)
+        tombstones = try c.decode([String: EnrichmentTombstone].self, forKey: .tombstones)
+        historicalCursor = try c.decodeIfPresent(EnrichmentHistoricalCursor.self, forKey: .historicalCursor)
+        updatedAt = try c.decode(Date.self, forKey: .updatedAt)
     }
 
     /// Counts by state, for the public status dictionary. No identifiers.
