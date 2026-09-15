@@ -178,4 +178,71 @@ final class OpenWearablesHealthSDKTests: XCTestCase {
         XCTAssertNil(sdk.tokenRefreshEndpoint)
         sdk.configure(host: "https://sync.example.com")
     }
+
+    /// Simulates a background cold start: persist the host, then drop the
+    /// in-memory value the way a fresh process looks before `configure` runs.
+    func testApiBaseUrlFallsBackToPersistedHostWithoutConfigure() {
+        withIsolatedHostState { sdk in
+            OpenWearablesHealthSdkKeychain.saveCustomRefreshUrl(nil)
+            OpenWearablesHealthSdkKeychain.saveHost("https://bg-relaunch.example.com/")
+            sdk.host = nil
+
+            XCTAssertEqual(sdk.apiBaseUrl, "https://bg-relaunch.example.com/api/v1")
+            XCTAssertEqual(
+                sdk.tokenRefreshEndpoint?.absoluteString,
+                "https://bg-relaunch.example.com/api/v1/token/refresh"
+            )
+        }
+    }
+
+    func testApiBaseUrlPrefersInMemoryHostOverPersisted() {
+        withIsolatedHostState { sdk in
+            OpenWearablesHealthSdkKeychain.saveCustomRefreshUrl(nil)
+            OpenWearablesHealthSdkKeychain.saveHost("https://persisted.example.com")
+            sdk.host = "https://in-memory.example.com"
+
+            XCTAssertEqual(sdk.apiBaseUrl, "https://in-memory.example.com/api/v1")
+        }
+    }
+
+    func testApiBaseUrlNilWhenHostMissingFromMemoryAndPersistence() {
+        withIsolatedHostState { sdk in
+            OpenWearablesHealthSdkKeychain.saveHost(nil)
+            OpenWearablesHealthSdkKeychain.saveCustomRefreshUrl(nil)
+            sdk.host = nil
+
+            XCTAssertNil(sdk.apiBaseUrl)
+            XCTAssertNil(sdk.tokenRefreshEndpoint)
+        }
+    }
+
+    func testTokenRefreshUsesPersistedCustomURLWhenHostNotInMemory() {
+        withIsolatedHostState { sdk in
+            OpenWearablesHealthSdkKeychain.saveHost(nil)
+            OpenWearablesHealthSdkKeychain.saveCustomRefreshUrl("https://auth.example.com/v1/refresh")
+            sdk.host = nil
+
+            XCTAssertNil(sdk.apiBaseUrl)
+            XCTAssertEqual(
+                sdk.tokenRefreshEndpoint?.absoluteString,
+                "https://auth.example.com/v1/refresh"
+            )
+        }
+    }
+
+    /// The SDK is a singleton, so `init`'s `getHost()` restore cannot be
+    /// re-run. These tests clear `host` in memory and rely on the same
+    /// persistence fallback `apiBaseUrl` / `tokenRefreshEndpoint` use.
+    private func withIsolatedHostState(_ body: (OpenWearablesHealthSDK) -> Void) {
+        let sdk = OpenWearablesHealthSDK.shared
+        let previousHost = sdk.host
+        let previousPersisted = OpenWearablesHealthSdkKeychain.getHost()
+        let previousRefresh = OpenWearablesHealthSdkKeychain.getCustomRefreshUrl()
+        defer {
+            sdk.host = previousHost
+            OpenWearablesHealthSdkKeychain.saveHost(previousPersisted)
+            OpenWearablesHealthSdkKeychain.saveCustomRefreshUrl(previousRefresh)
+        }
+        body(sdk)
+    }
 }
