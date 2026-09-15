@@ -67,6 +67,11 @@ public enum HealthDataType: String, CaseIterable, Sendable {
     case dietaryFatTotal
     case dietaryWater
     
+    // Running Dynamics (iOS 16.0+) — sensor-derived, not computable from distance/steps
+    case runningPower
+    case runningVerticalOscillation
+    case runningGroundContactTime
+
     // Workout
     case workout
 
@@ -168,6 +173,21 @@ public enum HealthDataType: String, CaseIterable, Sendable {
             return HKObjectType.quantityType(forIdentifier: .dietaryFatTotal)
         case .dietaryWater:
             return HKObjectType.quantityType(forIdentifier: .dietaryWater)
+        case .runningPower:
+            if #available(iOS 16.0, *) {
+                return HKObjectType.quantityType(forIdentifier: .runningPower)
+            }
+            return nil
+        case .runningVerticalOscillation:
+            if #available(iOS 16.0, *) {
+                return HKObjectType.quantityType(forIdentifier: .runningVerticalOscillation)
+            }
+            return nil
+        case .runningGroundContactTime:
+            if #available(iOS 16.0, *) {
+                return HKObjectType.quantityType(forIdentifier: .runningGroundContactTime)
+            }
+            return nil
         case .workout:
             return HKObjectType.workoutType()
         case .workoutEffortScore:
@@ -411,7 +431,7 @@ extension OpenWearablesHealthSDK {
             "notes": NSNull(),
             "values": stats,
             "segments": NSNull(),
-            "laps": NSNull(),
+            "laps": _buildWorkoutLaps(w, dateFormatter: df),
             "route": NSNull(),
             "samples": NSNull(),
             "metadata": NSNull()
@@ -443,6 +463,17 @@ extension OpenWearablesHealthSDK {
              HKObjectType.quantityType(forIdentifier: .bloodPressureDiastolic):
             return HKUnit.millimeterOfMercury()
         default:
+            if #available(iOS 16.0, *) {
+                if qt == HKObjectType.quantityType(forIdentifier: .runningPower) {
+                    return .watt()
+                }
+                if qt == HKObjectType.quantityType(forIdentifier: .runningVerticalOscillation) {
+                    return .meterUnit(with: .centi)
+                }
+                if qt == HKObjectType.quantityType(forIdentifier: .runningGroundContactTime) {
+                    return .secondUnit(with: .milli)
+                }
+            }
             if #available(iOS 18.0, *) {
                 if qt == HKObjectType.quantityType(forIdentifier: .workoutEffortScore)
                     || qt == HKObjectType.quantityType(forIdentifier: .estimatedWorkoutEffortScore) {
@@ -519,6 +550,17 @@ extension OpenWearablesHealthSDK {
         case HKObjectType.quantityType(forIdentifier: .dietaryWater):
             return (.liter(), "L")
         default:
+            if #available(iOS 16.0, *) {
+                if qt == HKObjectType.quantityType(forIdentifier: .runningPower) {
+                    return (.watt(), "W")
+                }
+                if qt == HKObjectType.quantityType(forIdentifier: .runningVerticalOscillation) {
+                    return (.meterUnit(with: .centi), "cm")
+                }
+                if qt == HKObjectType.quantityType(forIdentifier: .runningGroundContactTime) {
+                    return (.secondUnit(with: .milli), "ms")
+                }
+            }
             if #available(iOS 18.0, *) {
                 if qt == HKObjectType.quantityType(forIdentifier: .workoutEffortScore)
                     || qt == HKObjectType.quantityType(forIdentifier: .estimatedWorkoutEffortScore) {
@@ -724,13 +766,45 @@ extension OpenWearablesHealthSDK {
             "notes": NSNull(),
             "values": stats,
             "segments": NSNull(),
-            "laps": NSNull(),
+            "laps": _buildWorkoutLaps(w, dateFormatter: dateFormatter),
             "route": NSNull(),
             "samples": NSNull(),
             "metadata": NSNull()
         ]
     }
     
+    // MARK: - Workout laps / events
+
+    /// Maps HealthKit workout events (lap / segment / marker) into the payload `laps` array.
+    /// Returns `NSNull()` when the workout has none of those events.
+    internal func _buildWorkoutLaps(_ w: HKWorkout, dateFormatter: ISO8601DateFormatter) -> Any {
+        let events = w.workoutEvents ?? []
+        let laps: [[String: Any]] = events.compactMap { ev in
+            guard let type = _workoutEventTypeString(ev.type) else { return nil }
+            var lap: [String: Any] = [
+                "type": type,
+                "startDate": dateFormatter.string(from: ev.dateInterval.start),
+                "endDate": dateFormatter.string(from: ev.dateInterval.end),
+                "duration": ev.dateInterval.duration,
+                "metadata": _metadataDict(ev.metadata)
+            ]
+            if let length = ev.metadata?[HKMetadataKeyLapLength] as? HKQuantity {
+                lap["distanceM"] = length.doubleValue(for: .meter())
+            }
+            return lap
+        }
+        return laps.isEmpty ? NSNull() : laps
+    }
+
+    internal func _workoutEventTypeString(_ type: HKWorkoutEventType) -> String? {
+        switch type {
+        case .lap: return "lap"
+        case .segment: return "segment"
+        case .marker: return "marker"
+        default: return nil
+        }
+    }
+
     // MARK: - Workout stats builder (shared between mappers)
     
     private func _buildWorkoutStats(_ w: HKWorkout) -> [[String: Any]] {

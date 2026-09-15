@@ -1,4 +1,5 @@
 import XCTest
+import HealthKit
 @testable import OpenWearablesHealthSDK
 
 final class OpenWearablesHealthSDKTests: XCTestCase {
@@ -89,6 +90,85 @@ final class OpenWearablesHealthSDKTests: XCTestCase {
             OpenWearablesHealthSDK.absoluteHTTPURL(from: " https://auth.example.com/v1/refresh ")?.absoluteString,
             "https://auth.example.com/v1/refresh"
         )
+    }
+
+    func testRunningDynamicsTypesMapToHealthKit() {
+        XCTAssertEqual(HealthDataType.runningPower.rawValue, "runningPower")
+        XCTAssertEqual(HealthDataType.runningVerticalOscillation.rawValue, "runningVerticalOscillation")
+        XCTAssertEqual(HealthDataType.runningGroundContactTime.rawValue, "runningGroundContactTime")
+
+        if #available(iOS 16.0, *) {
+            XCTAssertEqual(
+                HealthDataType.runningPower.toHKSampleType()?.identifier,
+                HKQuantityTypeIdentifier.runningPower.rawValue
+            )
+            XCTAssertEqual(
+                HealthDataType.runningVerticalOscillation.toHKSampleType()?.identifier,
+                HKQuantityTypeIdentifier.runningVerticalOscillation.rawValue
+            )
+            XCTAssertEqual(
+                HealthDataType.runningGroundContactTime.toHKSampleType()?.identifier,
+                HKQuantityTypeIdentifier.runningGroundContactTime.rawValue
+            )
+        }
+    }
+
+    func testWorkoutLapsIncludeLapSegmentAndMarker() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let lap = HKWorkoutEvent(
+            type: .lap,
+            dateInterval: DateInterval(start: start, duration: 60),
+            metadata: [HKMetadataKeyLapLength: HKQuantity(unit: .meter(), doubleValue: 400)]
+        )
+        let marker = HKWorkoutEvent(
+            type: .marker,
+            dateInterval: DateInterval(start: start.addingTimeInterval(60), duration: 0),
+            metadata: nil
+        )
+        let pause = HKWorkoutEvent(
+            type: .pause,
+            dateInterval: DateInterval(start: start.addingTimeInterval(90), duration: 0),
+            metadata: nil
+        )
+        let workout = HKWorkout(
+            activityType: .running,
+            start: start,
+            end: start.addingTimeInterval(120),
+            workoutEvents: [lap, marker, pause],
+            totalEnergyBurned: nil,
+            totalDistance: nil,
+            metadata: nil
+        )
+
+        let df = ISO8601DateFormatter()
+        let laps = OpenWearablesHealthSDK.shared._buildWorkoutLaps(workout, dateFormatter: df)
+
+        guard let rows = laps as? [[String: Any]] else {
+            XCTFail("Expected laps array, got \(laps)")
+            return
+        }
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0]["type"] as? String, "lap")
+        XCTAssertEqual(rows[0]["duration"] as? TimeInterval, 60)
+        XCTAssertEqual(rows[0]["distanceM"] as? Double, 400)
+        XCTAssertEqual(rows[1]["type"] as? String, "marker")
+        XCTAssertEqual(OpenWearablesHealthSDK.shared._workoutEventTypeString(.segment), "segment")
+        XCTAssertNil(OpenWearablesHealthSDK.shared._workoutEventTypeString(.pause))
+    }
+
+    func testWorkoutWithoutEventsHasNullLaps() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let workout = HKWorkout(
+            activityType: .running,
+            start: start,
+            end: start.addingTimeInterval(60),
+            workoutEvents: nil,
+            totalEnergyBurned: nil,
+            totalDistance: nil,
+            metadata: nil
+        )
+        let laps = OpenWearablesHealthSDK.shared._buildWorkoutLaps(workout, dateFormatter: ISO8601DateFormatter())
+        XCTAssertTrue(laps is NSNull)
     }
 
     func testInvalidPersistedRefreshURLDoesNotFallBackToSyncHost() {
