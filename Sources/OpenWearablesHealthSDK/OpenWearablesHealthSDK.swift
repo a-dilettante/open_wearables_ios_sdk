@@ -303,9 +303,9 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
         let bgCfg = URLSessionConfiguration.background(withIdentifier: bgSessionId)
         bgCfg.isDiscretionary = false
         bgCfg.waitsForConnectivity = true
-        // Outbox retries go through this session. Serialize them (one connection at a
-        // time instead of a parallel burst) and cap how long a stale batch may linger
-        // in the system (default resource timeout is 7 days).
+        // Carries the drain of pre-0.14 outbox leftovers and nothing else. Serialize
+        // them (one connection at a time instead of a parallel burst) and cap how long
+        // a stale batch may linger in the system (default resource timeout is 7 days).
         bgCfg.httpMaximumConnectionsPerHost = 1
         bgCfg.timeoutIntervalForResource = 3600
         self.session = URLSession(configuration: bgCfg, delegate: self, delegateQueue: nil)
@@ -329,6 +329,11 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
     // MARK: - Public API: Background Completion Handler
     
     /// Set the background URL session completion handler (call from AppDelegate).
+    ///
+    /// Only reached while draining outbox items written by an SDK version before 0.14.
+    /// Sync uploads run on the foreground session and an interrupted round is rebuilt
+    /// from HealthKit, so on an install that never wrote an outbox item the background
+    /// session stays idle and this handler is never invoked.
     public static func setBackgroundCompletionHandler(_ handler: @escaping () -> Void) {
         bgCompletionHandler = handler
     }
