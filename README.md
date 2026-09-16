@@ -87,7 +87,8 @@ sdk.requestAuthorization(types: [.steps, .heartRate, .sleep]) { granted in
 // Stop sync
 sdk.stopBackgroundSync()
 
-// Sign out
+// Sign out. Reports the disconnect to the backend, then clears all local state.
+// The report is best effort and never blocks or fails the sign out.
 sdk.signOut()
 ```
 
