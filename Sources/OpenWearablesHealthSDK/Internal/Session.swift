@@ -20,9 +20,17 @@ struct SyncState: Codable {
     var totalSentCount: Int
     var completedTypes: Set<String>
     var currentTypeIndex: Int
+    /// Stable for one historical or live run. Optional so a state file written
+    /// before this field existed still decodes; the next attribution call fills it in.
+    var sessionId: String?
     
     var hasProgress: Bool {
         return totalSentCount > 0 || !completedTypes.isEmpty
+    }
+    
+    /// What the backend `/sync` and `/logs` endpoints already accept.
+    var syncType: String {
+        fullExport ? "historical" : "live"
     }
 }
 
@@ -117,6 +125,19 @@ extension OpenWearablesHealthSDK {
     
     // MARK: - Start New Sync State
     
+    /// Session id and type the backend uses to group batches and log events into one
+    /// `SyncRun`. Generates and persists an id if the on-disk state predates the field.
+    internal func currentSyncAttribution() -> (sessionId: String, syncType: String)? {
+        guard var state = loadSyncState() else { return nil }
+        if let sessionId = state.sessionId, !sessionId.isEmpty {
+            return (sessionId, state.syncType)
+        }
+        let sessionId = UUID().uuidString
+        state.sessionId = sessionId
+        saveSyncState(state)
+        return (sessionId, state.syncType)
+    }
+    
     internal func startNewSyncState(fullExport: Bool, types: [HKSampleType]) -> SyncState {
         let state = SyncState(
             userKey: userKey(),
@@ -125,7 +146,8 @@ extension OpenWearablesHealthSDK {
             typeProgress: [:],
             totalSentCount: 0,
             completedTypes: [],
-            currentTypeIndex: 0
+            currentTypeIndex: 0,
+            sessionId: UUID().uuidString
         )
         
         saveSyncState(state)

@@ -136,6 +136,13 @@ extension OpenWearablesHealthSDK {
         body: [String: Any],
         completion: @escaping () -> Void
     ) {
+        var body = body
+        // Opens (or continues) the SyncRun. `syncType` is not on the logs schema yet,
+        // so it stays off this body; the matching `/sync` batches carry both fields.
+        if let sessionId = currentSyncAttribution()?.sessionId {
+            body["syncSessionId"] = sessionId
+        }
+        
         guard let data = try? JSONSerialization.data(withJSONObject: body) else {
             logMessage("Failed to serialize sync log")
             completion()

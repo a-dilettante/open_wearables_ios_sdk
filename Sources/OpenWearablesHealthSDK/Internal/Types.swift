@@ -258,7 +258,7 @@ extension OpenWearablesHealthSDK {
             }
         }
         
-        return [
+        var payload: [String: Any] = [
             "provider": "apple",
             "sdkVersion": OpenWearablesHealthSDK.sdkVersion,
             "syncTimestamp": dateFormatter.string(from: Date()),
@@ -268,6 +268,13 @@ extension OpenWearablesHealthSDK {
                 "sleep": sleep
             ]
         ]
+        // Backend already reads these (`body.get`); without them the batch is treated as
+        // a session-less live upload and cannot be joined to the SyncRun the logs open.
+        if let attribution = currentSyncAttribution() {
+            payload["syncSessionId"] = attribution.sessionId
+            payload["syncType"] = attribution.syncType
+        }
+        return payload
     }
     
     // MARK: - Type mapping
