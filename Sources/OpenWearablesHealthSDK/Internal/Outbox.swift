@@ -4,6 +4,9 @@ import HealthKit
 extension OpenWearablesHealthSDK {
 
     // MARK: - Outbox model
+
+    /// Decoded, never encoded: the sync path stopped writing outbox items in 0.14, so
+    /// the only items on disk are leftovers from an earlier SDK version.
     internal struct OutboxItem: Codable {
         let typeIdentifier: String
         let userKey: String
@@ -12,18 +15,11 @@ extension OpenWearablesHealthSDK {
         let wasFullExport: Bool?
     }
 
+    /// Read-only. Nothing creates this directory anymore; when it is missing the
+    /// enumerations in `clearOutbox` and `retryOutboxIfPossible` simply find nothing.
     internal func outboxDir() -> URL {
         let base = try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         return (base ?? FileManager.default.temporaryDirectory).appendingPathComponent("health_outbox", isDirectory: true)
-    }
-
-    internal func ensureOutboxDir() {
-        try? FileManager.default.createDirectory(at: outboxDir(), withIntermediateDirectories: true)
-    }
-
-    internal func newPath(_ name: String, ext: String) -> URL {
-        ensureOutboxDir()
-        return outboxDir().appendingPathComponent("\(name).\(ext)")
     }
 
     // MARK: - Combined upload
