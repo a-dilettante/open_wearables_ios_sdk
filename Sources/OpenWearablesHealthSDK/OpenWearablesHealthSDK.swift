@@ -125,12 +125,13 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
     /// `requestId` is reused across a 401 retry so both attempts can be correlated.
     internal func buildRequest(
         url: URL,
+        method: String = "POST",
         credential: String?,
         requestId: String,
         outboxItemId: String? = nil
     ) -> URLRequest {
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
+        request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(OpenWearablesHealthSDK.sdkVersion, forHTTPHeaderField: "X-Open-Wearables-SDK-Version")
         request.setValue("ios", forHTTPHeaderField: "X-Open-Wearables-SDK-Platform")
@@ -285,6 +286,14 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
         return URL(string: "\(base)/sdk/users/\(userId)/sync")
     }
 
+    /// Connection resource deleted on sign out. Unlike `syncEndpoint` and
+    /// `logsEndpoint` this one is not under `/sdk`.
+    internal var disconnectEndpoint: URL? {
+        guard let userId = userId else { return nil }
+        guard let base = apiBaseUrl else { return nil }
+        return URL(string: "\(base)/users/\(userId)/connections/apple")
+    }
+
     /// Token-refresh URL. An absolute `tokenRefreshURL` from `configure` wins;
     /// otherwise `{host}/api/v1/token/refresh`. A stored override that is not a
     /// valid `http(s)` URL is treated as missing rather than falling back to the
@@ -422,9 +431,57 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
         logMessage("Signed in: userId=\(userId), mode=\(authMode)")
     }
     
-    /// Sign out - cancels sync, clears all state.
+    /// How long the sign-out disconnect may stay in flight. Shorter than the session
+    /// default, because the user has just signed out and the app may be dismissed
+    /// moments later - a request that has not landed by then never will.
+    private static let disconnectTimeout: TimeInterval = 10
+    
+    /// Tells the backend the user deliberately disconnected, so the connection is not
+    /// left looking healthy with a `last_synced_at` that never moves again.
+    ///
+    /// Best effort by design. The request is built while the credential is still in the
+    /// Keychain and handed to the session before `signOut` clears it, so the in-flight
+    /// request keeps working from the header it already carries. Nothing about signing
+    /// out locally depends on the outcome, and the task is deliberately not registered
+    /// as a sync upload so the `cancelSync()` in `signOut` does not cancel it.
+    ///
+    /// Revoked HealthKit permission and app deletion cannot be reported this way; only
+    /// a deliberate sign out reaches here.
+    internal func notifyBackendOfDisconnect() {
+        guard let endpoint = disconnectEndpoint, let credential = authCredential else {
+            logMessage("Disconnect not sent - no session")
+            return
+        }
+        
+        var request = buildRequest(
+            url: endpoint,
+            method: "DELETE",
+            credential: credential,
+            requestId: UUID().uuidString
+        )
+        request.timeoutInterval = Self.disconnectTimeout
+        
+        foregroundSession.dataTask(with: request) { [weak self] _, response, error in
+            guard let self = self else { return }
+            if let error = error {
+                self.logDiagnostic("Disconnect failed: \(error.localizedDescription)")
+                return
+            }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if (200...299).contains(status) {
+                self.logMessage("Disconnect reported to backend")
+            } else {
+                self.logDiagnostic("Disconnect rejected: HTTP \(status)")
+            }
+        }.resume()
+    }
+    
+    /// Sign out - reports the disconnect, cancels sync, clears all state.
     public func signOut() {
         logMessage("Signing out")
+        
+        // Before anything clears the credential that authenticates it.
+        notifyBackendOfDisconnect()
         
         bumpSessionEpoch()
         cancelSync()
