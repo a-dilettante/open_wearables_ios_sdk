@@ -31,8 +31,7 @@ extension OpenWearablesHealthSDK {
     // MARK: - Sync State File
     
     internal func syncStateDir() -> URL {
-        let base = try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-        return (base ?? FileManager.default.temporaryDirectory).appendingPathComponent("health_sync_state", isDirectory: true)
+        return stateBaseDirectory().appendingPathComponent("health_sync_state", isDirectory: true)
     }
     
     internal func ensureSyncStateDir() {

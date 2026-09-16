@@ -238,6 +238,22 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
     // Per-user state (anchors)
     internal let defaults = UserDefaults(suiteName: "com.openwearables.healthsdk.state") ?? .standard
 
+    /// Overrides the root the SDK keeps its on-disk state under. Production leaves this
+    /// nil and resolves to Application Support; tests point it at a temporary directory
+    /// so a test run cannot read or delete the state of the app hosting it.
+    internal var stateDirectoryOverride: URL?
+
+    /// Root for `outboxDir()` and `syncStateDir()`.
+    internal func stateBaseDirectory() -> URL {
+        if let stateDirectoryOverride = stateDirectoryOverride {
+            return stateDirectoryOverride
+        }
+        let base = try? FileManager.default.url(
+            for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true
+        )
+        return base ?? FileManager.default.temporaryDirectory
+    }
+
     // Observer queries
     internal var activeObserverQueries: [HKObserverQuery] = []
 
@@ -1293,7 +1309,7 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
     
     /// Claims the sync slot for a new run and returns its generation, or nil when
     /// another run still owns it.
-    private func beginSyncRun() -> Int? {
+    internal func beginSyncRun() -> Int? {
         syncLock.lock()
         
         var takeOverStaleRun = false
@@ -1331,7 +1347,7 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
     
     /// Releases the sync slot. A run that has already lost the slot to a newer one
     /// must not clear it, otherwise it would let a third run start on top of a live one.
-    private func finishSync(generation: Int) {
+    internal func finishSync(generation: Int) {
         syncLock.lock()
         defer { syncLock.unlock() }
         guard generation == syncGeneration else { return }

@@ -185,9 +185,30 @@ internal class OpenWearablesHealthSdkKeychain {
         defaults.synchronize()
     }
     
+    // MARK: - Test Seam
+    
+    /// Replaces Keychain-backed storage with an in-memory store. Production leaves this
+    /// nil.
+    ///
+    /// An XCTest bundle runs inside `xctest`, which belongs to no keychain access group,
+    /// so every `SecItemAdd` there fails with `errSecMissingEntitlement` (-34018) and no
+    /// credential can be read back. Tests that need a signed-in SDK install a store here;
+    /// it also keeps a test run from touching the credentials on the real device.
+    internal static var volatileStore: [String: String]?
+    
+    private static let volatileStoreLock = NSLock()
+    
     // MARK: - Private Keychain Operations
     
     private static func save(key: String, value: String) {
+        volatileStoreLock.lock()
+        if volatileStore != nil {
+            volatileStore?[key] = value
+            volatileStoreLock.unlock()
+            return
+        }
+        volatileStoreLock.unlock()
+        
         guard let data = value.data(using: .utf8) else { return }
         
         delete(key: key)
@@ -207,6 +228,13 @@ internal class OpenWearablesHealthSdkKeychain {
     }
     
     private static func load(key: String) -> String? {
+        volatileStoreLock.lock()
+        if let volatileStore = volatileStore {
+            volatileStoreLock.unlock()
+            return volatileStore[key]
+        }
+        volatileStoreLock.unlock()
+        
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -228,6 +256,14 @@ internal class OpenWearablesHealthSdkKeychain {
     }
     
     private static func delete(key: String) {
+        volatileStoreLock.lock()
+        if volatileStore != nil {
+            volatileStore?[key] = nil
+            volatileStoreLock.unlock()
+            return
+        }
+        volatileStoreLock.unlock()
+        
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
