@@ -18,8 +18,7 @@ extension OpenWearablesHealthSDK {
     /// Read-only. Nothing creates this directory anymore; when it is missing the
     /// enumerations in `clearOutbox` and `retryOutboxIfPossible` simply find nothing.
     internal func outboxDir() -> URL {
-        let base = try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-        return (base ?? FileManager.default.temporaryDirectory).appendingPathComponent("health_outbox", isDirectory: true)
+        return stateBaseDirectory().appendingPathComponent("health_outbox", isDirectory: true)
     }
 
     // MARK: - Combined upload
