@@ -996,7 +996,7 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
                 return
             }
             
-            let payload = self.serializeCombinedStreaming(samples: allSamples)
+            let payload = self.buildCombinedPayload(samples: allSamples)
             
             self.uploadCombinedPayload(
                 payload: payload, endpoint: endpoint, credential: freshCredential,

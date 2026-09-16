@@ -206,8 +206,15 @@ public enum HealthDataType: String, CaseIterable, Sendable {
 
 extension OpenWearablesHealthSDK {
 
-    // MARK: - Memory-efficient streaming serialization
-    internal func serializeCombinedStreaming(samples: [HKSample]) -> [String: Any] {
+    // MARK: - Combined payload
+
+    /// Builds one combined sync payload from the samples collected in a round.
+    ///
+    /// Not a streaming serializer: the payload is accumulated as a dictionary tree and
+    /// handed to `JSONSerialization` in one piece, so peak memory scales with the round.
+    /// It is bounded by the round size instead - background rounds carry 100 records
+    /// (~65 KB), and the 2000-record rounds only run in the foreground.
+    internal func buildCombinedPayload(samples: [HKSample]) -> [String: Any] {
         var workouts: [[String: Any]] = []
         var records: [[String: Any]] = []
         var sleep: [[String: Any]] = []
@@ -263,54 +270,6 @@ extension OpenWearablesHealthSDK {
         ]
     }
     
-    // MARK: - Combined serialization (legacy)
-    internal func serializeCombined(samples: [HKSample], anchors: [String: HKQueryAnchor]) -> [String: Any] {
-        var workouts: [[String: Any]] = []
-        var records: [[String: Any]] = []
-        var sleep: [[String: Any]] = []
-        let df = ISO8601DateFormatter()
-        
-        for s in samples {
-            if let w = s as? HKWorkout {
-                workouts.append(_mapWorkout(w))
-            } else if let q = s as? HKQuantitySample {
-                records.append(_mapQuantity(q))
-            } else if let c = s as? HKCategorySample {
-                if c.categoryType.identifier == HKCategoryTypeIdentifier.sleepAnalysis.rawValue {
-                    sleep.append(_mapSleep(c))
-                } else {
-                    records.append(_mapCategory(c))
-                }
-            } else if let corr = s as? HKCorrelation {
-                records.append(contentsOf: _mapCorrelation(corr))
-            } else {
-                records.append([
-                    "id": s.uuid.uuidString,
-                    "type": s.sampleType.identifier,
-                    "startDate": df.string(from: s.startDate),
-                    "endDate": df.string(from: s.endDate),
-                    "zoneOffset": _zoneOffsetString(metadata: s.metadata, date: s.startDate),
-                    "source": _mapSource(s.sourceRevision, device: s.device),
-                    "value": NSNull(),
-                    "unit": NSNull(),
-                    "parentId": NSNull(),
-                    "metadata": _metadataDict(s.metadata)
-                ])
-            }
-        }
-        
-        return [
-            "provider": "apple",
-            "sdkVersion": OpenWearablesHealthSDK.sdkVersion,
-            "syncTimestamp": df.string(from: Date()),
-            "data": [
-                "workouts": workouts,
-                "records": records,
-                "sleep": sleep
-            ]
-        ]
-    }
-
     // MARK: - Type mapping
     
     internal func mapTypes(_ types: [HealthDataType]) -> [HKSampleType] {
@@ -320,122 +279,6 @@ extension OpenWearablesHealthSDK {
     /// Legacy mapping from raw strings - used for restoring persisted types from Keychain.
     internal func mapTypesFromStrings(_ names: [String]) -> [HKSampleType] {
         return names.compactMap { HealthDataType(rawValue: $0)?.toHKSampleType() }
-    }
-
-    // MARK: - Record mappers
-
-    private func _mapQuantity(_ q: HKQuantitySample) -> [String: Any] {
-        let df = ISO8601DateFormatter()
-        let (unit, unitOut) = _defaultUnit(for: q.quantityType)
-        
-        var value: Double
-        let finalUnit: String
-        
-        if q.quantity.is(compatibleWith: unit) {
-            value = q.quantity.doubleValue(for: unit)
-            finalUnit = unitOut
-        } else {
-            let fallbackUnit = _getFallbackUnit(for: q.quantityType)
-            value = q.quantity.doubleValue(for: fallbackUnit)
-            finalUnit = fallbackUnit.unitString
-        }
-
-        if q.quantityType.identifier == HKQuantityTypeIdentifier.oxygenSaturation.rawValue {
-            value *= 100
-        }
-
-        return [
-            "id": q.uuid.uuidString,
-            "type": q.quantityType.identifier,
-            "startDate": df.string(from: q.startDate),
-            "endDate": df.string(from: q.endDate),
-            "zoneOffset": _zoneOffsetString(metadata: q.metadata, date: q.startDate),
-            "source": _mapSource(q.sourceRevision, device: q.device),
-            "value": value,
-            "unit": finalUnit,
-            "parentId": NSNull(),
-            "metadata": _metadataDict(q.metadata)
-        ]
-    }
-
-    private func _mapCategory(_ c: HKCategorySample) -> [String: Any] {
-        let df = ISO8601DateFormatter()
-        return [
-            "id": c.uuid.uuidString,
-            "type": c.categoryType.identifier,
-            "startDate": df.string(from: c.startDate),
-            "endDate": df.string(from: c.endDate),
-            "zoneOffset": _zoneOffsetString(metadata: c.metadata, date: c.startDate),
-            "source": _mapSource(c.sourceRevision, device: c.device),
-            "value": c.value,
-            "unit": NSNull(),
-            "parentId": NSNull(),
-            "metadata": _metadataDict(c.metadata)
-        ]
-    }
-
-    private func _mapSleep(_ c: HKCategorySample) -> [String: Any] {
-        let df = ISO8601DateFormatter()
-        return [
-            "id": c.uuid.uuidString,
-            "parentId": NSNull(),
-            "stage": _sleepStageString(c.value),
-            "startDate": df.string(from: c.startDate),
-            "endDate": df.string(from: c.endDate),
-            "zoneOffset": _zoneOffsetString(metadata: c.metadata, date: c.startDate),
-            "source": _mapSource(c.sourceRevision, device: c.device),
-            "values": NSNull(),
-            "metadata": NSNull()
-        ]
-    }
-
-    private func _mapCorrelation(_ corr: HKCorrelation) -> [[String: Any]] {
-        var records: [[String: Any]] = []
-        let df = ISO8601DateFormatter()
-        let source = _mapSource(corr.sourceRevision, device: corr.device)
-
-        for sample in corr.objects {
-            if let q = sample as? HKQuantitySample {
-                let (unit, unitOut) = _defaultUnit(for: q.quantityType)
-                let value = q.quantity.doubleValue(for: unit)
-                records.append([
-                    "id": q.uuid.uuidString,
-                    "type": q.quantityType.identifier,
-                    "startDate": df.string(from: q.startDate),
-                    "endDate": df.string(from: q.endDate),
-                    "zoneOffset": _zoneOffsetString(metadata: q.metadata, fallback: corr.metadata, date: q.startDate),
-                    "source": source,
-                    "value": value,
-                    "unit": unitOut,
-                    "parentId": NSNull(),
-                    "metadata": _metadataDict(q.metadata)
-                ])
-            }
-        }
-        return records
-    }
-
-    private func _mapWorkout(_ w: HKWorkout) -> [String: Any] {
-        let df = ISO8601DateFormatter()
-        let stats = _buildWorkoutStats(w)
-
-        return [
-            "id": w.uuid.uuidString,
-            "parentId": NSNull(),
-            "type": _workoutTypeString(w.workoutActivityType),
-            "startDate": df.string(from: w.startDate),
-            "endDate": df.string(from: w.endDate),
-            "zoneOffset": _zoneOffsetString(metadata: w.metadata, date: w.startDate),
-            "source": _mapSource(w.sourceRevision, device: w.device),
-            "title": NSNull(),
-            "notes": NSNull(),
-            "values": stats,
-            "segments": NSNull(),
-            "laps": _buildWorkoutLaps(w, dateFormatter: df),
-            "route": NSNull(),
-            "samples": NSNull(),
-            "metadata": NSNull()
-        ]
     }
 
     // MARK: - Units / helpers
