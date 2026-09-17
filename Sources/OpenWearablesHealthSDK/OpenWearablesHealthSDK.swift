@@ -41,7 +41,7 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
     /// Shared singleton instance.
     public static let shared = OpenWearablesHealthSDK()
     
-    internal static let sdkVersion = "0.15.0-circle.1"
+    internal static let sdkVersion = "0.15.0-circle.2"
     
     // MARK: - Public Callbacks
     
@@ -986,10 +986,20 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
     
     // MARK: - Round-Robin Sync Orchestration
     
+    /// How many rounds in a row a type's HealthKit query may fail before the sync stops
+    /// re-querying it and leaves it for the next sync. Bounds the retry so one broken type
+    /// cannot spin a session forever, while never advancing past unread samples.
+    private static let maxQueryFailuresPerSync = 3
+
     private class RoundRobinState {
         var olderThanCursors: [String: Date] = [:]
         var anchorCursors: [String: HKQueryAnchor] = [:]
         var completedTypes: Set<String> = []
+        /// Consecutive HealthKit query failures per type within this sync. A success resets it.
+        var queryFailures: [String: Int] = [:]
+        /// Types whose queries kept failing this sync. They are left incomplete, with their
+        /// cursor or anchor untouched, so the next sync retries them from the same position.
+        var deferredTypes: Set<String> = []
         /// Sync run this state belongs to, so late callbacks can tell whether they are stale.
         let generation: Int
         /// Whether the caller already knows it runs in the background (BG tasks do).
@@ -1089,9 +1099,16 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
             return
         }
         
-        let incompleteTypes = types.filter { !rrState.completedTypes.contains($0.identifier) }
+        let incompleteTypes = types.filter {
+            !rrState.completedTypes.contains($0.identifier) && !rrState.deferredTypes.contains($0.identifier)
+        }
         if incompleteTypes.isEmpty {
-            completion(true)
+            // Deferred types stay incomplete on purpose: reporting the sync as complete would
+            // finalize the session and record their unread samples as done.
+            if !rrState.deferredTypes.isEmpty {
+                logDiagnostic("Sync round-robin finished with \(rrState.deferredTypes.count) type(s) deferred after repeated HealthKit query failures - they retry on the next sync")
+            }
+            completion(rrState.deferredTypes.isEmpty)
             return
         }
         
@@ -1243,13 +1260,33 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
         }
         
         let type = types[index]
+        var queryError: Error? = nil
+        let recordQueryOutcome: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            let typeId = type.identifier
+            guard let error = queryError else {
+                rrState.queryFailures[typeId] = 0
+                return
+            }
+            let failures = (rrState.queryFailures[typeId] ?? 0) + 1
+            rrState.queryFailures[typeId] = failures
+            let nsError = error as NSError
+            if failures >= OpenWearablesHealthSDK.maxQueryFailuresPerSync {
+                rrState.deferredTypes.insert(typeId)
+                self.logDiagnostic("\(self.shortTypeName(typeId)): HealthKit query failed \(failures) rounds in a row (\(nsError.domain)/\(nsError.code)) - deferring this type until the next sync, cursor kept")
+            } else {
+                self.logDiagnostic("\(self.shortTypeName(typeId)): HealthKit query failed (\(nsError.domain)/\(nsError.code)) - continuing with other types, retrying next round (\(failures)/\(OpenWearablesHealthSDK.maxQueryFailuresPerSync))")
+            }
+        }
         
         if fullExport {
             let cursor = rrState.olderThanCursors[type.identifier]
-            fetchOneChunkNewestFirst(type: type, olderThan: cursor, chunkLimit: chunkLimit, generation: rrState.generation) {
+            fetchOneChunkNewestFirst(type: type, olderThan: cursor, chunkLimit: chunkLimit, generation: rrState.generation,
+                                     onQueryError: { queryError = $0 }) {
                 [weak self] success, samples, seriesRecords, nextOlderThan, isDone in
                 guard let self = self else { completion(false, accumulated); return }
                 if !success { completion(false, accumulated); return }
+                recordQueryOutcome()
                 
                 let result = TypeRoundResult(
                     type: type, samples: samples, seriesRecords: seriesRecords, count: samples.count,
@@ -1263,10 +1300,12 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
             }
         } else {
             let anchor = rrState.anchorCursors[type.identifier]
-            fetchOneChunkIncremental(type: type, anchor: anchor, chunkLimit: chunkLimit, generation: rrState.generation) {
+            fetchOneChunkIncremental(type: type, anchor: anchor, chunkLimit: chunkLimit, generation: rrState.generation,
+                                     onQueryError: { queryError = $0 }) {
                 [weak self] success, samples, seriesRecords, deletedMetrics, newAnchor, anchorData, isDone in
                 guard let self = self else { completion(false, accumulated); return }
                 if !success { completion(false, accumulated); return }
+                recordQueryOutcome()
                 
                 let result = TypeRoundResult(
                     type: type, samples: samples, seriesRecords: seriesRecords, deletedMetrics: deletedMetrics, count: samples.count,
@@ -1426,6 +1465,7 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
     
     private func fetchOneChunkNewestFirst(
         type: HKSampleType, olderThan: Date?, chunkLimit: Int, generation: Int,
+        onQueryError: @escaping (Error) -> Void = { _ in },
         completion: @escaping (_ success: Bool, _ samples: [HKSample], _ seriesRecords: [[String: Any]], _ nextOlderThan: Date?, _ isDone: Bool) -> Void
     ) {
         if isSyncCancelled(generation: generation) { completion(false, [], [], nil, false); return }
@@ -1454,8 +1494,11 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
                         completion(false, [], [], nil, false)
                         return
                     }
-                    self.logMessage("\(self.shortTypeName(type.identifier)): \(error.localizedDescription) - pausing without advancing cursor")
-                    completion(false, [], [], nil, false)
+                    // Not protected data: let the round continue with the other types. The
+                    // cursor is handed back unchanged and the type stays incomplete, so the
+                    // failed window is re-read next round instead of being skipped.
+                    onQueryError(error)
+                    completion(true, [], [], olderThan, false)
                     return
                 }
                 
@@ -1480,6 +1523,7 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
     
     private func fetchOneChunkIncremental(
         type: HKSampleType, anchor: HKQueryAnchor?, chunkLimit: Int, generation: Int,
+        onQueryError: @escaping (Error) -> Void = { _ in },
         completion: @escaping (_ success: Bool, _ samples: [HKSample], _ seriesRecords: [[String: Any]], _ deletedMetrics: [[String: String]], _ newAnchor: HKQueryAnchor?, _ anchorData: Data?, _ isDone: Bool) -> Void
     ) {
         if isSyncCancelled(generation: generation) { completion(false, [], [], [], nil, nil, false); return }
@@ -1503,8 +1547,11 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
                         completion(false, [], [], [], nil, nil, false)
                         return
                     }
-                    self.logMessage("\(self.shortTypeName(type.identifier)): \(error.localizedDescription) - pausing without advancing anchor")
-                    completion(false, [], [], [], nil, nil, false)
+                    // Not protected data: let the round continue with the other types. No new
+                    // anchor is returned and the type stays incomplete, so the same anchor is
+                    // queried again next round instead of the samples being skipped.
+                    onQueryError(error)
+                    completion(true, [], [], [], nil, nil, false)
                     return
                 }
                 

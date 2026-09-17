@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.15.0-circle.2 (Circle fork — not released upstream)
+
+* **A failing HealthKit query no longer stops or skips a sync round**: when a type's sample query returns an error that is not the protected-data lock, the round now continues with the other types, the failed type keeps its cursor or anchor exactly where it was, and it is queried again on the next round. Upstream marks such a type done for the round (advancing past whatever it could not read); the previous fork build stopped the whole round instead. Each failure is logged at diagnostic level with the error domain and code. After three consecutive failures the type is deferred for the rest of that sync, the sync ends as incomplete, and the next sync retries it from the same position.
+
 ## 0.15.0-circle.1 (Circle fork — not released upstream)
 
 * **Acknowledged per-user sync anchors survive sign-in and sign-out (Circle)**: `signIn` and `signOut` no longer call `resetAllAnchors()`. Anchor keys and the initial-export-complete marker are scoped to the OW user id, so re-signing into the same account resumes from its acknowledged anchors instead of triggering a full re-export, and a different user cannot read them. Sign-out still cancels sync, stops observers and background tasks, and clears credentials, the sync session, the outbox, and enrichment state. The explicit `resetAnchors()` API remains destructive.
