@@ -92,6 +92,32 @@ final class OpenWearablesHealthSDKTests: XCTestCase {
         )
     }
 
+    func testCyclingTypesMapToHealthKit() {
+        XCTAssertEqual(HealthDataType.cyclingPower.rawValue, "cyclingPower")
+        XCTAssertEqual(HealthDataType.cyclingCadence.rawValue, "cyclingCadence")
+        XCTAssertEqual(HealthDataType.cyclingSpeed.rawValue, "cyclingSpeed")
+        XCTAssertEqual(HealthDataType.cyclingFunctionalThresholdPower.rawValue, "cyclingFunctionalThresholdPower")
+
+        if #available(iOS 17.0, *) {
+            XCTAssertEqual(
+                HealthDataType.cyclingPower.toHKSampleType()?.identifier,
+                HKQuantityTypeIdentifier.cyclingPower.rawValue
+            )
+            XCTAssertEqual(
+                HealthDataType.cyclingCadence.toHKSampleType()?.identifier,
+                HKQuantityTypeIdentifier.cyclingCadence.rawValue
+            )
+            XCTAssertEqual(
+                HealthDataType.cyclingSpeed.toHKSampleType()?.identifier,
+                HKQuantityTypeIdentifier.cyclingSpeed.rawValue
+            )
+            XCTAssertEqual(
+                HealthDataType.cyclingFunctionalThresholdPower.toHKSampleType()?.identifier,
+                HKQuantityTypeIdentifier.cyclingFunctionalThresholdPower.rawValue
+            )
+        }
+    }
+
     func testRunningDynamicsTypesMapToHealthKit() {
         XCTAssertEqual(HealthDataType.runningPower.rawValue, "runningPower")
         XCTAssertEqual(HealthDataType.runningVerticalOscillation.rawValue, "runningVerticalOscillation")
