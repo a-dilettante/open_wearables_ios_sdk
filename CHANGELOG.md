@@ -2,6 +2,8 @@
 
 ## 0.15.0-circle.1 (Circle fork — not released upstream)
 
+* **Acknowledged per-user sync anchors survive sign-in and sign-out (Circle)**: `signIn` and `signOut` no longer call `resetAllAnchors()`. Anchor keys and the initial-export-complete marker are scoped to the OW user id, so re-signing into the same account resumes from its acknowledged anchors instead of triggering a full re-export, and a different user cannot read them. Sign-out still cancels sync, stops observers and background tasks, and clears credentials, the sync session, the outbox, and enrichment state. The explicit `resetAnchors()` API remains destructive.
+
 * **Restored `syncNow(completion:)`**: the 0.14.0 rework removed it with the legacy per-type path, breaking the RN wrapper's existing bridge. It is back as a thin wrapper over an incremental sync round, safe to call mid-sync.
 
 ### Workout-detail enrichment (additive pipeline)

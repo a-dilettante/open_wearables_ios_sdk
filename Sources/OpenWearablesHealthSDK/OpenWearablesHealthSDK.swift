@@ -442,7 +442,7 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
         
         bumpSessionEpoch()
         clearSyncSession()
-        resetAllAnchors()
+        // Circle: retain acknowledged per-user sync anchors across authentication.
         clearOutbox()
 
         // The enrichment queue is per-OW-user with no cross-account recovery path, so a
@@ -508,7 +508,7 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
         }.resume()
     }
     
-    /// Sign out - reports the disconnect, cancels sync, clears all state.
+    /// Sign out - reports the disconnect, cancels sync and clears credentials/pending work, retaining acknowledged per-user anchors.
     public func signOut() {
         logMessage("Signing out")
         
@@ -522,13 +522,13 @@ public final class OpenWearablesHealthSDK: NSObject, URLSessionDelegate, URLSess
         stopProtectedDataMonitoring()
         stopForegroundMonitoring()
         cancelAllBGTasks()
-        resetAllAnchors()
+        // Circle: retain acknowledged per-user sync anchors across authentication.
         clearSyncSession()
         clearOutbox()
         clearEnrichmentState()
         OpenWearablesHealthSdkKeychain.clearAll()
 
-        logMessage("Sign out complete - all sync state reset")
+        logMessage("Sign out complete - credentials and pending work cleared")
     }
     
     /// Update tokens (e.g., after external token refresh).
