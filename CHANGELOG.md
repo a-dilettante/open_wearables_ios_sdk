@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+* **Cycling power and cadence** (#44): authorize and sync `cyclingPower`, `cyclingCadence`, `cyclingSpeed`, and `cyclingFunctionalThresholdPower` (iOS 17+) as quantity samples — the same path as `heartRate` / `runningPower` — so Bluetooth power-meter timeseries and Apple Watch cycling workouts actually reach the backend. Workout-level averages for power, cadence and speed are populated from `HKWorkout` statistics.
 * **Running dynamics** (#13): authorize and sync `runningPower`, `runningVerticalOscillation`, and `runningGroundContactTime` (iOS 16+) as quantity samples — the same path as `heartRate` — so workout-level averages and per-sample timeseries actually reach the backend. Workout `laps` are now populated from `HKWorkout.workoutEvents` (lap / segment / marker) instead of always `null`.
 * **Background token refresh after relaunch** (#18): restore the persisted host on SDK `init` and fall back to it in `apiBaseUrl`, so a HealthKit / `BGTask` / background `URLSession` cold start can refresh an expired session before the host app calls `configure(host:)` again.
 * **Configurable token-refresh URL**: `configure(host:tokenRefreshURL:)` accepts an optional absolute refresh endpoint for deployments whose auth/mint server is not the sync host. Omitted or blank keeps `{host}/api/v1/token/refresh`. The override is persisted so a background `BGTask` in a fresh process can refresh before `configure` runs again. Request/response contract is unchanged (`POST {"refresh_token"}` → `{"access_token","refresh_token"}`).

@@ -72,6 +72,12 @@ public enum HealthDataType: String, CaseIterable, Sendable {
     case runningVerticalOscillation
     case runningGroundContactTime
 
+    // Cycling (iOS 17.0+) — Bluetooth power meters and Apple Watch cycling workouts
+    case cyclingPower
+    case cyclingCadence
+    case cyclingSpeed
+    case cyclingFunctionalThresholdPower
+
     // Workout
     case workout
 
@@ -186,6 +192,26 @@ public enum HealthDataType: String, CaseIterable, Sendable {
         case .runningGroundContactTime:
             if #available(iOS 16.0, *) {
                 return HKObjectType.quantityType(forIdentifier: .runningGroundContactTime)
+            }
+            return nil
+        case .cyclingPower:
+            if #available(iOS 17.0, *) {
+                return HKObjectType.quantityType(forIdentifier: .cyclingPower)
+            }
+            return nil
+        case .cyclingCadence:
+            if #available(iOS 17.0, *) {
+                return HKObjectType.quantityType(forIdentifier: .cyclingCadence)
+            }
+            return nil
+        case .cyclingSpeed:
+            if #available(iOS 17.0, *) {
+                return HKObjectType.quantityType(forIdentifier: .cyclingSpeed)
+            }
+            return nil
+        case .cyclingFunctionalThresholdPower:
+            if #available(iOS 17.0, *) {
+                return HKObjectType.quantityType(forIdentifier: .cyclingFunctionalThresholdPower)
             }
             return nil
         case .workout:
@@ -324,6 +350,18 @@ extension OpenWearablesHealthSDK {
                     return .secondUnit(with: .milli)
                 }
             }
+            if #available(iOS 17.0, *) {
+                if qt == HKObjectType.quantityType(forIdentifier: .cyclingPower)
+                    || qt == HKObjectType.quantityType(forIdentifier: .cyclingFunctionalThresholdPower) {
+                    return .watt()
+                }
+                if qt == HKObjectType.quantityType(forIdentifier: .cyclingCadence) {
+                    return .count().unitDivided(by: .minute())
+                }
+                if qt == HKObjectType.quantityType(forIdentifier: .cyclingSpeed) {
+                    return .meter().unitDivided(by: .second())
+                }
+            }
             if #available(iOS 18.0, *) {
                 if qt == HKObjectType.quantityType(forIdentifier: .workoutEffortScore)
                     || qt == HKObjectType.quantityType(forIdentifier: .estimatedWorkoutEffortScore) {
@@ -409,6 +447,18 @@ extension OpenWearablesHealthSDK {
                 }
                 if qt == HKObjectType.quantityType(forIdentifier: .runningGroundContactTime) {
                     return (.secondUnit(with: .milli), "ms")
+                }
+            }
+            if #available(iOS 17.0, *) {
+                if qt == HKObjectType.quantityType(forIdentifier: .cyclingPower)
+                    || qt == HKObjectType.quantityType(forIdentifier: .cyclingFunctionalThresholdPower) {
+                    return (.watt(), "W")
+                }
+                if qt == HKObjectType.quantityType(forIdentifier: .cyclingCadence) {
+                    return (.count().unitDivided(by: .minute()), "count/min")
+                }
+                if qt == HKObjectType.quantityType(forIdentifier: .cyclingSpeed) {
+                    return (.meter().unitDivided(by: .second()), "m/s")
                 }
             }
             if #available(iOS 18.0, *) {
@@ -727,6 +777,23 @@ extension OpenWearablesHealthSDK {
                let gctStats = w.statistics(for: gctType),
                let avg = gctStats.averageQuantity() {
                 stats.append(["type": "averageGroundContactTime", "value": avg.doubleValue(for: .secondUnit(with: .milli)), "unit": "ms"])
+            }
+            if #available(iOS 17.0, *) {
+                if let powerType = HKQuantityType.quantityType(forIdentifier: .cyclingPower),
+                   let powerStats = w.statistics(for: powerType),
+                   let avg = powerStats.averageQuantity() {
+                    stats.append(["type": "averageCyclingPower", "value": avg.doubleValue(for: .watt()), "unit": "W"])
+                }
+                if let cadenceType = HKQuantityType.quantityType(forIdentifier: .cyclingCadence),
+                   let cadenceStats = w.statistics(for: cadenceType),
+                   let avg = cadenceStats.averageQuantity() {
+                    stats.append(["type": "averageCyclingCadence", "value": avg.doubleValue(for: .count().unitDivided(by: .minute())), "unit": "count/min"])
+                }
+                if let speedType = HKQuantityType.quantityType(forIdentifier: .cyclingSpeed),
+                   let speedStats = w.statistics(for: speedType),
+                   let avg = speedStats.averageQuantity() {
+                    stats.append(["type": "averageCyclingSpeed", "value": avg.doubleValue(for: HKUnit.meter().unitDivided(by: .second())), "unit": "m/s"])
+                }
             }
         } else {
             if let energy = w.totalEnergyBurned {
